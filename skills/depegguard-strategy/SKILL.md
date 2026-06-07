@@ -31,6 +31,51 @@ Stablecoins should trade at $1.0000. Any deviation is a signal. This skill quant
 
 ## Detection Workflow
 
+### Step 0: Route via CMC Skills Marketplace
+
+Before executing the workflow directly, agents operating within the CMC Agent Hub should route through the Skills Marketplace smart routing system. This enables skill discovery, versioning, and parameter validation before execution.
+
+**1. Discover the skill**
+
+Call `find_skill` to locate DepegGuard via semantic search:
+
+```
+find_skill(query="stablecoin depeg risk")
+```
+
+Expected response includes a skill entry with `unique_name: "depegguard-strategy"` and a description matching stablecoin depeg detection. If multiple results are returned, select the entry where `unique_name` is `depegguard-strategy`.
+
+**2. Execute the skill**
+
+Call `execute_skill` with the resolved unique name and pass the target coin symbol and preview flag:
+
+```
+execute_skill(
+  unique_name="depegguard-strategy",
+  params={
+    "coin": "{SYMBOL}",
+    "preview": false
+  }
+)
+```
+
+Replace `{SYMBOL}` with the target ticker (e.g. `USDC`, `USDT`, `FRAX`). Set `preview: true` to return a dry-run signal classification without fetching live data — useful for testing routing before a full execution.
+
+**3. Agent prompt template**
+
+Agents invoking DepegGuard via the marketplace should use the following prompt structure:
+
+```
+You are a DeFi risk agent. A user wants to know if their stablecoin position is safe.
+
+1. Call find_skill with query "stablecoin depeg risk"
+2. From the results, select the skill with unique_name "depegguard-strategy"
+3. Call execute_skill with unique_name "depegguard-strategy" and params { "coin": "<SYMBOL>", "preview": false }
+4. Return the full DepegGuard Strategy Report to the user including signal level, recommended action, confidence, and next review time
+```
+
+If `find_skill` returns no results or `execute_skill` fails, fall through to Step 1 and run the workflow directly using the CMC MCP tools.
+
 ### Step 1: Fetch Live Stablecoin Prices
 
 Call get_crypto_quotes_latest with the following CMC IDs:
