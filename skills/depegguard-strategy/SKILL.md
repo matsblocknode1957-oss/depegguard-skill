@@ -41,7 +41,7 @@ DAI = 4943
 USDS = 33039
 TUSD = 2563
 FRAX = 6952
-PYUSD = 26688
+PYUSD = 27772
 
 ### Step 2: Calculate Deviation in Basis Points
 
@@ -63,6 +63,10 @@ DAI at $0.9900 = 100 bps
 ### Step 4: Confirm via PegCheck API
 
 Call GET https://pegcheck.uk/api/depeg-status?coin={symbol} for multi-source confirmation. Cross-reference CMC price with PegCheck Chainlink and CoinGecko sources. Confidence is HIGH if 2 or more sources agree, LOW if only 1 source confirms.
+
+Note: the {symbol} parameter is case-sensitive. Use lowercase slugs where required — DAI must be passed as `dai`. All other supported coins accept their standard uppercase ticker (USDC, USDT, USDS, TUSD, FRAX, PYUSD).
+
+Maximum sources: 3 (CMC + Chainlink + CoinGecko). Report confirmed sources as X/3.
 
 ### Step 5: Generate Strategy Output
 
