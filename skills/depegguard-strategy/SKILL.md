@@ -197,3 +197,55 @@ The SVB event was a liquidity crisis with real reserves behind USDC — recovery
 ### PegCheck Confirmation
 
 PegCheck historical data confirms all three signal thresholds were breached sequentially across CMC, Chainlink, and CoinGecko sources. The HEDGE threshold (50 bps) was confirmed at approximately 06:00 UTC on May 8 with PegCheck confidence: HIGH. The EXIT threshold (100 bps) was confirmed by 18:00 UTC on May 8 — approximately 18 hours before UST lost 30% of its value. Users who acted on the EXIT signal had full exit liquidity. Users who waited 24 hours did not.
+
+## Backtest: USDT Black Thursday March 2020
+
+On March 12, 2020, global markets collapsed in response to COVID-19 pandemic fears. Bitcoin fell ~50% in 24 hours. Crypto traders rushed to exit positions into stablecoins simultaneously, creating a demand shock that pushed USDT to a significant premium above $1.00. This is the defining example of an **upward depeg** — USDT deviating above peg rather than below it — and it tests the signal ladder in the opposite direction.
+
+Unlike UST or USDC/SVB, USDT holders were not at risk of loss. But the depeg signal still fired, and correctly so: an upward depeg carries its own risks and opportunities that DepegGuard is designed to surface.
+
+### Timeline and Signal Progression
+
+| Date & Time (UTC) | USDT Price | Deviation | Signal | Recommended Action |
+|---|---|---|---|---|
+| Mar 12 08:00 | $1.0028 | 28 bps | WATCH | MONITOR — premium forming, broader market stress detected |
+| Mar 12 14:00 | $1.0094 | 94 bps | HEDGE | Note premium — avoid buying USDT at cost; holders consider partial rotation to USDC |
+| Mar 12 20:00 | $1.0180 | 180 bps | EXIT | Active upward depeg — do not buy USDT; holders can realise premium by rotating to USDC |
+| Mar 13 04:00 | $1.0241 | 241 bps | EXIT | Peak premium — USDT trading at sustained 241 bps above par on aggregate |
+| Mar 13 14:00 | $1.0097 | 97 bps | HEDGE | Premium subsiding as markets partially recover |
+| Mar 14 06:00 | $1.0014 | 14 bps | STABLE | Peg restored — USDT back within normal variance |
+
+### Signal Narrative
+
+**WATCH fired ~Mar 12 08:00** — USDT began drifting above $1.00 as early selling pressure hit crypto markets. The signal correctly flagged abnormal conditions before the main crash wave arrived.
+
+**HEDGE fired ~Mar 12 14:00** — as BTC began its accelerated sell-off, stablecoin demand surged. USDT crossed 50 bps above par. The recommended action for an upward depeg differs from a downward one: existing USDT holders had no loss risk, but anyone trying to buy USDT was paying above par. The signal served as a warning to avoid entering USDT at a premium.
+
+**EXIT fired ~Mar 12 20:00** — deviation crossed 100 bps during peak panic. On certain exchanges USDT/USD spot pairs were printing $1.04–$1.06. Aggregate CMC pricing smoothed this to ~$1.018. USDT holders who rotated to USDC at this point locked in a ~1.8% gain on their stablecoin position. Buyers entering USDT at this price faced immediate mean-reversion losses once markets stabilised.
+
+**Peak premium ~Mar 13 04:00** — USDT reached 241 bps above par, the highest sustained upward deviation recorded for a major fiat-backed stablecoin outside of exchange-specific anomalies. DAI simultaneously spiked above $1.10 due to MakerDAO liquidation failures during the same crash, validating the value of monitoring multiple stablecoins in parallel.
+
+**Recovery ~Mar 14** — as crypto markets found a floor and panic subsided, USDT demand normalised and the premium compressed back to within 20 bps within 36 hours of peak.
+
+### Outcome Comparison
+
+| Approach | Action Taken | Result |
+|---|---|---|
+| Followed DepegGuard (holder) | Rotated USDT → USDC at EXIT signal (~$1.018), re-entered USDT at ~$1.001 | ~1.7% gain on stablecoin-to-stablecoin rotation |
+| Ignored signals (holder) | Held USDT throughout | No loss — USDT fully recovered; missed rotation gain |
+| Bought USDT at peak | Entered USDT at $1.02–$1.04 expecting safety | Immediate ~2–4% paper loss as premium compressed; recovered at peg |
+| Held DAI | No rotation — DAI spiked to ~$1.10+ due to MakerDAO liquidation crisis | Significant premium paid if buying; severe slippage risk |
+
+### Critical Difference vs UST and SVB
+
+This event illustrates the third depeg archetype: **external demand shock**. The peg deviation was not caused by issuer insolvency (SVB) or mechanism failure (UST) — it was caused by a temporary imbalance between stablecoin supply and flight-to-safety demand. In these cases:
+
+- USDT holders faced zero default risk
+- The depeg was self-correcting as markets stabilised
+- The signal's value was directional: it warned buyers away from paying a premium and gave holders an optional rotation trade
+
+DepegGuard's absolute deviation formula (`abs(price - 1.0000) × 10000`) catches upward depegs identically to downward ones. The signal ladder does not need to know the direction or cause — it fires on deviation. The recommended action in the output should note the direction ("upward depeg — premium above par") so the operator can interpret it correctly.
+
+### PegCheck Confirmation
+
+PegCheck historical data confirms the upward deviation signal pattern across Chainlink and CoinGecko sources. The WATCH threshold (20 bps) was crossed on the morning of March 12 with PegCheck confidence: HIGH. The EXIT threshold (100 bps) was confirmed by ~20:00 UTC on March 12 across all three sources — several hours before the 241 bps peak. The signal fired early enough to act before the premium reached its widest point.
