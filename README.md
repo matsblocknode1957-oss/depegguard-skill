@@ -1,5 +1,9 @@
 # DepegGuard Strategy Skill
 
+## Why This Exists
+
+In May 2022 the UST/Terra collapse wiped out $40 billion in days. There was no early warning system, no automated protection, no structured signal telling people to exit before liquidity dried up. DepegGuard was built because that shouldn't happen again. It turns depeg signals into actionable strategy — before liquidity dries up.
+
 A CMC Agent Hub Strategy Skill that detects stablecoin depeg signals and outputs structured trading strategies — when to exit, hedge, or rotate stablecoin positions.
 
 Built for the BNB HACK: AI Trading Agent Edition hackathon.
