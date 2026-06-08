@@ -6,6 +6,8 @@ In May 2022 the UST/Terra collapse wiped out $40 billion in days. There was no e
 
 A CMC Agent Hub Strategy Skill that detects stablecoin depeg signals and outputs structured trading strategies — when to exit, hedge, or rotate stablecoin positions.
 
+![DepegGuard Stack Diagram](./stack-diagram.png.jpg)
+
 Built for the BNB HACK: AI Trading Agent Edition hackathon.
 
 ## What it does
