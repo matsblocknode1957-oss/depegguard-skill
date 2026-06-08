@@ -298,3 +298,84 @@ DepegGuard's absolute deviation formula (`abs(price - 1.0000) × 10000`) catches
 ### PegCheck Confirmation
 
 PegCheck historical data confirms the upward deviation signal pattern across Chainlink and CoinGecko sources. The WATCH threshold (20 bps) was crossed on the morning of March 12 with PegCheck confidence: HIGH. The EXIT threshold (100 bps) was confirmed by ~20:00 UTC on March 12 across all three sources — several hours before the 241 bps peak. The signal fired early enough to act before the premium reached its widest point.
+
+## Systemic Risk: Correlation Alert
+
+A single stablecoin depegging is often an issuer-specific event — a bank run on reserves (SVB/USDC), a mechanism failure (UST), or a temporary liquidity squeeze. But when multiple unrelated stablecoins deviate from peg simultaneously, the cause is likely systemic: broader market stress, a shared counterparty exposure, or a contagion event that will affect any coin holding similar assets.
+
+DepegGuard monitors for this pattern and triggers a **Systemic Risk: Correlation Alert** when the conditions are met.
+
+### Detection Logic
+
+After Step 3 (signal classification), count the number of coins at WATCH or above:
+
+```
+at_risk = [coin for coin in monitored_coins if deviation_bps(coin) >= 20]
+correlation_score = len(at_risk)
+
+if correlation_score >= 2:
+    trigger SYSTEMIC RISK alert
+```
+
+Market stress level is assigned as follows:
+
+| Correlation Score | Market Stress Level |
+|---|---|
+| 0–1 coins at WATCH or above | LOW — isolated or no signal |
+| 2–3 coins at WATCH or above | ELEVATED — correlation detected |
+| 4+ coins at WATCH or above | HIGH — systemic stress confirmed |
+
+The correlation alert fires regardless of which coins are affected or whether they are algorithmically, fiat-backed, or CDP-backed — cross-type correlation is the most informative signal, as it rules out mechanism-specific causes.
+
+### Live Example: June 8, 2026
+
+On June 8, 2026, three stablecoins triggered simultaneously:
+
+| Coin | Price | Deviation | Signal |
+|---|---|---|---|
+| FRAX | ~$0.9909 | 91 bps | HEDGE |
+| DOLA | ~$0.9936 | 64 bps | HEDGE |
+| alUSD | ~$0.9694 | 306 bps | EXIT |
+
+Correlation score: **3** — Market stress level: **ELEVATED**
+
+No single issuer connects FRAX (Frax Finance), DOLA (Inverse Finance), and alUSD (Alchemix). Their simultaneous deviation suggests a shared external pressure: DeFi liquidity thinning, a common collateral type under stress, or a sector-wide confidence event. The alert does not identify the cause — it flags the pattern and escalates urgency across all three positions.
+
+### Historical Reference: March 2023 SVB Contagion
+
+The March 2023 SVB collapse is the clearest historical example of stablecoin correlation in action. USDC was the primary vehicle (Circle's $3.3B exposure), but the contagion spread immediately:
+
+- **USDC** fell to $0.8770 at trough (1,230 bps)
+- **DAI** depegged below $0.9000 — DAI's collateral pool included significant USDC exposure via PSM (Peg Stability Module), creating a direct transmission channel
+- **FRAX** lost its peg as FRAX v2 held USDC as part-collateral
+
+All three coins fired EXIT signals within hours of each other. A user monitoring only USDC would have seen one depeg. A user running the Correlation Alert would have seen three EXIT-level coins and a HIGH systemic stress classification — a materially different read on the severity of the event.
+
+The correct response to a HIGH stress classification is not just to rotate out of the flagged coins but to question whether *any* stablecoin in the monitored set is safe, and to consider rotating into T-bill-backed or exchange-custody alternatives until the correlation breaks.
+
+### Output Format Addition
+
+When the Correlation Alert fires, append a **Systemic Risk** section to the DepegGuard Strategy Report:
+
+```
+--- Systemic Risk Assessment ---
+Correlation Score: {N} coins at WATCH or above
+Market Stress Level: LOW / ELEVATED / HIGH
+Coins flagged: {list of coins at WATCH or above with their signal levels}
+Assessment: {one of the following}
+  LOW     — Isolated signal. Monitor flagged coins individually.
+  ELEVATED — Cross-coin correlation detected. Broader stress likely. Review all stablecoin exposure.
+  HIGH    — Systemic stress confirmed. Consider rotating to non-DeFi stablecoin alternatives.
+```
+
+Example output for the June 8, 2026 event:
+
+```
+--- Systemic Risk Assessment ---
+Correlation Score: 3 coins at WATCH or above
+Market Stress Level: ELEVATED
+Coins flagged: FRAX (HEDGE, 91 bps), DOLA (HEDGE, 64 bps), alUSD (EXIT, 306 bps)
+Assessment: Cross-coin correlation detected. Broader stress likely. Review all stablecoin exposure.
+```
+
+The Systemic Risk section always appears after the Priority Alert and before the Confidence section in the report.
