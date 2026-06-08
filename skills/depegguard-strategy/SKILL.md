@@ -379,3 +379,76 @@ Assessment: Cross-coin correlation detected. Broader stress likely. Review all s
 ```
 
 The Systemic Risk section always appears after the Priority Alert and before the Confidence section in the report.
+
+## x402 Pay-Per-Request Access
+
+DepegGuard supports the [x402 pay-per-request protocol](https://x402.org), allowing agents to access live depeg data without an API key. Payment is $0.001 USDC per request, settled on Base (Chain ID 8453).
+
+No subscription, no API key rotation, no rate-limit negotiation — agents pay per call and get data back in the same HTTP round-trip.
+
+### Endpoint
+
+```
+GET https://pegcheck.uk/api/depeg-status?coin={symbol}
+```
+
+### Payment Flow
+
+The x402 flow follows the HTTP 402 standard:
+
+1. Agent calls the endpoint without a payment header
+2. Server returns `402 Payment Required` with a `X-Payment-Requirements` header containing the payment details: amount, token contract, recipient address, and chain
+3. Agent pays $0.001 USDC on Base to the specified address and receives a signed payment receipt
+4. Agent retries the request with the `X-Payment` header containing the receipt
+5. Server verifies on-chain and returns the depeg data
+
+The payment is atomic — if the server does not return data, the payment does not settle.
+
+### Code Example
+
+```python
+import httpx
+from x402.client import handle_402  # x402 Python client
+
+async def get_depeg_status(coin: str) -> dict:
+    url = f"https://pegcheck.uk/api/depeg-status?coin={coin}"
+
+    async with httpx.AsyncClient() as client:
+        # handle_402 wraps the request: sends initial call, detects 402,
+        # pays USDC on Base, retries with payment receipt automatically
+        response = await handle_402(
+            client=client,
+            url=url,
+            wallet_private_key=AGENT_WALLET_KEY,
+            chain_id=8453,  # Base
+        )
+        return response.json()
+```
+
+For agents using the **Trust Wallet Agent Kit**, x402 is natively supported via the `x402_request` tool — no custom payment logic required:
+
+```
+x402_request(
+  url="https://pegcheck.uk/api/depeg-status?coin=USDC",
+  max_amount_usdc=0.001,
+  chain_id=8453
+)
+```
+
+The kit handles the 402 handshake, USDC approval, and receipt attachment automatically. Use `x402_quote` first to preview the cost before committing.
+
+### No API Key Required
+
+Standard PegCheck access requires a CMC API key passed as `X-CMC-MCP-API-KEY`. The x402 endpoint is keyless — USDC on Base is the credential. This makes it suitable for:
+
+- Autonomous agents that cannot hold long-lived credentials
+- Multi-agent systems where each agent pays independently
+- One-off queries from untrusted or ephemeral execution environments
+
+### Protocol Compatibility
+
+This endpoint implements the x402 protocol as specified at [x402.org](https://x402.org) and is compatible with:
+
+- **Trust Wallet Agent Kit** — native `x402_request` / `x402_quote` tool support
+- **CMC x402 protocol** — CoinMarketCap's agent-native payment standard for data APIs
+- Any x402-compliant HTTP client library (Python, TypeScript, Go)
