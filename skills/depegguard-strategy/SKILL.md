@@ -76,6 +76,34 @@ You are a DeFi risk agent. A user wants to know if their stablecoin position is 
 
 If `find_skill` returns no results or `execute_skill` fails, fall through to Step 1 and run the workflow directly using the CMC MCP tools.
 
+### Step 0.5: Market Context — Fear & Greed Index
+
+Call `get_global_metrics_latest` to fetch the current Fear & Greed Index score before evaluating any depeg signal. This score contextualises market conditions and adjusts the urgency of any signal that fires.
+
+```
+get_global_metrics_latest()
+```
+
+Extract `fear_and_greed_index.value` (0–100) and `fear_and_greed_index.value_classification` from the response.
+
+**Interpretation table:**
+
+| Score | Classification | Depeg Signal Adjustment |
+|---|---|---|
+| 0–25 | Extreme Fear | Market stress elevated — depeg signals more likely to escalate; treat WATCH as HEDGE urgency |
+| 26–45 | Fear | Caution — monitor closely; standard signal thresholds apply with increased frequency |
+| 46–55 | Neutral | Normal conditions — standard signal thresholds apply |
+| 56–75 | Greed | Overleveraged market — liquidation risk elevated; depeg contagion spreads faster |
+| 76–100 | Extreme Greed | High risk — any depeg signal should be treated as more severe than the raw bps suggest |
+
+**Critical escalation rule:**
+
+> **Extreme Greed (76–100) + HEDGE signal = treat as EXIT level urgency.**
+
+When the Fear & Greed Index is in Extreme Greed territory, the market is likely over-leveraged and crowded into risk assets. A stablecoin depeg at this point can trigger cascading liquidations with limited liquidity to absorb selling. The HEDGE threshold (50–99 bps) under these conditions carries the same exit urgency as the EXIT threshold (100+ bps) under normal conditions. Rotate the full position immediately rather than a partial 30–50% reduction.
+
+This escalation rule does not apply in the downward direction — Extreme Fear does not suppress signals. It raises urgency but never lowers it.
+
 ### Step 1: Fetch Live Stablecoin Prices
 
 Call get_crypto_quotes_latest with the following CMC IDs:
@@ -144,6 +172,8 @@ Generated timestamp
 Stablecoin Status table with columns: Coin, Price, Deviation, Signal, Action
 
 Priority Alert showing the highest risk coin, its signal, and recommended action
+
+Fear & Greed Index showing the current score, classification, and any signal escalation applied (e.g. "72 — Greed | No escalation" or "81 — Extreme Greed | HEDGE signals escalated to EXIT urgency")
 
 Confidence showing sources confirmed out of 3 (CMC + Chainlink + CoinGecko) and PegCheck confidence score
 
