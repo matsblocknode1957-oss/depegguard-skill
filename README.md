@@ -1,5 +1,7 @@
 # DepegGuard Strategy Skill
 
+[![Live API](https://img.shields.io/badge/Live%20API-green?style=flat-square)](https://pegcheck.uk/api/depeg-status?coin=USDC) [![Agent ID 1312](https://img.shields.io/badge/Agent%20ID%201312-blue?style=flat-square)](https://testnet.bscscan.com/token/0x8004a818bfb912233c491871b3d84c89a494bd9e?a=1312) [![BNB Chain](https://img.shields.io/badge/BNB%20Chain-yellow?style=flat-square)](https://www.bnbchain.org) [![CMC Agent Hub](https://img.shields.io/badge/CMC%20Agent%20Hub-blue?style=flat-square)](https://coinmarketcap.com)
+
 ## Why This Exists
 
 In May 2022 the UST/Terra collapse wiped out $40 billion in days. There was no early warning system, no automated protection, no structured signal telling people to exit before liquidity dried up. DepegGuard was built because that shouldn't happen again. It turns depeg signals into actionable strategy — before liquidity dries up.
