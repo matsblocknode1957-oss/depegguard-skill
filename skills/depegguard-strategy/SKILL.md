@@ -146,16 +146,23 @@ Maximum sources: 3 (CMC + Chainlink + CoinGecko). Report confirmed sources as X/
 Call the LiquidLens API to retrieve current liquidation exposure across Aave, Compound, and MakerDAO before generating the final strategy output:
 
 ```
-GET https://liquidlens.uk/api/positions/risk-summary
+GET https://liquidlens.uk/api/data
 ```
 
-Extract `overall_risk` (LOW / MEDIUM / HIGH) and per-protocol risk levels from the response. No authentication required.
+No authentication required. The response contains a `protocols` array with one entry per protocol. Each entry has the following fields used in this step:
+
+- `name` — protocol name (`"Aave v3"`, `"Compound v3"`, `"MakerDAO"`)
+- `riskLevel` — `"Low"`, `"Medium"`, or `"High"` (note: title case, not uppercase)
+- `atRisk` — formatted USD string of collateral at risk (e.g. `"$180M"`)
+- `liquidations24h` — integer count of liquidations in the last 24 hours
+
+There is no rolled-up `overall_risk` field. Derive the aggregate risk level by taking the worst `riskLevel` across all three protocols: any `"High"` entry makes the aggregate HIGH; any `"Medium"` with no `"High"` makes it MEDIUM; all `"Low"` makes it LOW.
 
 **Why this matters:** Stablecoin depegs and DeFi liquidations are reflexive. When a stablecoin loses its peg, positions using that stablecoin as collateral fall below their liquidation threshold. Forced selling then floods the market, depressing prices further and triggering the next wave of liquidations. High liquidation exposure means the system is pre-loaded — a depeg signal that would self-correct under normal conditions can instead trigger a cascade.
 
 **Signal amplification rules:**
 
-| Liquidation Risk | Depeg Signal | Adjusted Classification |
+| Aggregate Liquidation Risk | Depeg Signal | Adjusted Classification |
 |---|---|---|
 | LOW | Any | No change — standard signal applies |
 | MEDIUM | STABLE / WATCH | No change |
@@ -203,7 +210,7 @@ Priority Alert showing the highest risk coin, its signal, and recommended action
 
 Fear & Greed Index showing the current score, classification, and any signal escalation applied (e.g. "72 — Greed | No escalation" or "81 — Extreme Greed | HEDGE signals escalated to EXIT urgency")
 
-Liquidation Risk showing the LiquidLens overall risk level, per-protocol breakdown, and any CRITICAL flag applied (e.g. "HIGH — Aave: HIGH, Compound: MEDIUM, MakerDAO: HIGH | FRAX HEDGE → CRITICAL")
+Liquidation Risk showing the derived aggregate risk level, per-protocol breakdown from /api/data, and any CRITICAL flag applied (e.g. "HIGH — Aave: High, Compound: Medium, MakerDAO: High | FRAX HEDGE → CRITICAL")
 
 Confidence showing sources confirmed out of 3 (CMC + Chainlink + CoinGecko) and PegCheck confidence score
 
