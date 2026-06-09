@@ -29,6 +29,29 @@ Built for the BNB HACK: AI Trading Agent Edition hackathon.
 | 50-99 bps | HEDGE  | Reduce exposure 30-50% |
 | 100+ bps  | EXIT   | Rotate immediately |
 
+## Live Example Output
+
+```
+Generated: 2026-06-09 10:06 UTC
+
+FRAX — HEDGE (72 bps)
+Action: Reduce FRAX exposure by 30–50%. Rotate to USDT or USDC.
+
+Fear & Greed: 15 — Extreme Fear
+Signal adjustment: WATCH signals treated as HEDGE urgency.
+
+Liquidation Risk (LiquidLens /api/data):
+Aave v3: Medium — $324M at risk
+Compound v3: Low — $11M at risk  
+MakerDAO: Medium — $191M at risk
+Aggregate: MEDIUM — FRAX HEDGE elevated to HIGH PRIORITY
+
+Systemic Risk: LOW — isolated signal
+ETH: $1,669 (Chainlink) — collateral values compressed
+
+Next Review: 2026-06-09 10:36 UTC
+```
+
 ## Backtest Accuracy
 
 Analysis of **260,950 price snapshots** stored in the `price_history` table across all tracked stablecoins.
