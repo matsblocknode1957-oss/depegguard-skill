@@ -141,6 +141,34 @@ Note: the {symbol} parameter is case-sensitive. Use lowercase slugs where requir
 
 Maximum sources: 3 (CMC + Chainlink + CoinGecko). Report confirmed sources as X/3.
 
+### Step 4.5: Liquidation Risk Cross-Reference
+
+Call the LiquidLens API to retrieve current liquidation exposure across Aave, Compound, and MakerDAO before generating the final strategy output:
+
+```
+GET https://liquidlens.uk/api/positions/risk-summary
+```
+
+Extract `overall_risk` (LOW / MEDIUM / HIGH) and per-protocol risk levels from the response. No authentication required.
+
+**Why this matters:** Stablecoin depegs and DeFi liquidations are reflexive. When a stablecoin loses its peg, positions using that stablecoin as collateral fall below their liquidation threshold. Forced selling then floods the market, depressing prices further and triggering the next wave of liquidations. High liquidation exposure means the system is pre-loaded — a depeg signal that would self-correct under normal conditions can instead trigger a cascade.
+
+**Signal amplification rules:**
+
+| Liquidation Risk | Depeg Signal | Adjusted Classification |
+|---|---|---|
+| LOW | Any | No change — standard signal applies |
+| MEDIUM | STABLE / WATCH | No change |
+| MEDIUM | HEDGE | Elevate to HEDGE (HIGH PRIORITY) — act promptly, do not wait for escalation |
+| MEDIUM | EXIT | No change — EXIT already maximum urgency |
+| HIGH | STABLE / WATCH | Elevate to WATCH / HEDGE respectively — conditions warrant closer monitoring |
+| HIGH | HEDGE | **CRITICAL** — treat as EXIT level urgency, rotate immediately |
+| HIGH | EXIT | **CRITICAL** — systemic cascade risk, rotate all stablecoin exposure |
+
+**CRITICAL flag definition:** A CRITICAL classification means the depeg signal alone understates the risk. Forced liquidations across Aave, Compound, or MakerDAO can accelerate a depeg faster than the bps ladder captures in real time. CRITICAL signals should be treated as EXIT regardless of the raw bps reading.
+
+**Error handling:** If the LiquidLens endpoint is unavailable, note "Liquidation risk data unavailable — signal amplification check skipped" and proceed to Step 5 using the unamplified signal. Do not block output generation on this step.
+
 ### Step 5: Generate Strategy Output
 
 STABLE (0-19 bps):
@@ -174,6 +202,8 @@ Stablecoin Status table with columns: Coin, Price, Deviation, Signal, Action
 Priority Alert showing the highest risk coin, its signal, and recommended action
 
 Fear & Greed Index showing the current score, classification, and any signal escalation applied (e.g. "72 — Greed | No escalation" or "81 — Extreme Greed | HEDGE signals escalated to EXIT urgency")
+
+Liquidation Risk showing the LiquidLens overall risk level, per-protocol breakdown, and any CRITICAL flag applied (e.g. "HIGH — Aave: HIGH, Compound: MEDIUM, MakerDAO: HIGH | FRAX HEDGE → CRITICAL")
 
 Confidence showing sources confirmed out of 3 (CMC + Chainlink + CoinGecko) and PegCheck confidence score
 
