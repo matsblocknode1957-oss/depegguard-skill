@@ -10,7 +10,7 @@ A CMC Agent Hub Strategy Skill that detects stablecoin depeg signals and outputs
 
 ![DepegGuard Stack Diagram](./stack-diagram.png.jpg)
 
-Built for the BNB HACK: AI Trading Agent Edition hackathon.
+Submitted to multiple hackathons: Pharos (Skill-to-Agent Dual Cascade), BNB HACK: AI Trading Agent Edition, and Casper Agentic Buildathon 2026.
 
 ## What it does
 
@@ -105,10 +105,14 @@ See skills/depegguard-strategy/SKILL.md for full integration guide.
 
 PegCheck API: https://pegcheck.uk/api/depeg-status?coin={symbol}
 
-## Hackathon
+## Hackathons
 
-BNB HACK: AI Trading Agent Edition — Track 2: Strategy Skills
-DoraHacks: https://dorahacks.io/hackathon/bnbhack-twt-cmc
+This skill has been submitted to multiple hackathons:
+
+- **Pharos — Skill-to-Agent Dual Cascade**
+- **BNB HACK: AI Trading Agent Edition** — Track 2: Strategy Skills
+  DoraHacks: https://dorahacks.io/hackathon/bnbhack-twt-cmc
+- **Casper Agentic Buildathon 2026**
 
 ## License
 
