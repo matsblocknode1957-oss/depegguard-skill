@@ -1,0 +1,29 @@
+{
+  "schedule": "0 */5 * * * *",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "consumerAddress": "NEED: deploy StableGuardCREReceiver.sol with KeystoneForwarder (0xF8344CFd5c43616a4366C34E3EEE75af79a74482) as constructor arg, paste deployed address here",
+  "monitorAddress": "0x44930ef915b30CbA75C0B94d62cE516d7900d27C",
+  "dataStreamsBaseUrl": "https://api.chain.link",
+  "coins": [
+    {
+      "symbol": "USDC",
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "feedId": "0x0003dc85e8b01946bf9dfd8b0db860129181eb6105a8c8981d9f28e00b6f60d9"
+    },
+    {
+      "symbol": "USDT",
+      "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "feedId": "0x00032874077216155926e26c159c1c20a572921371d9de605fe9633e48d136f9"
+    },
+    {
+      "symbol": "DAI",
+      "address": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+      "feedId": "0x0003649272a19e143a7f4c2d98905b413e98dce81fb09287dcf4c513cba5cc72"
+    },
+    {
+      "symbol": "USDS",
+      "address": "0xdC035D45d973E3EC169d2276DDab16f1e407384F",
+      "feedId": "0x000356e7f4832f1664f60f148d07a09bdfd962154a41878fba78e21bb39abb3b"
+    }
+  ]
+}
