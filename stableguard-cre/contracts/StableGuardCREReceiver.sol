@@ -9,27 +9,49 @@ interface IPausable {
     function pause() external;
 }
 
+interface IDepegEventRegistry {
+    enum State {
+        WATCH, CONFIRMED_DEPEG, PROTECTION_PENDING, PARTIALLY_PROTECTED,
+        PROTECTED, RECOVERY_PENDING, PARTIALLY_RECOVERED,
+        NORMAL, EXPIRED, FAILED, SUPERSEDED
+    }
+    enum DestState { PENDING, COMPLETE, SUPERSEDED, FAILED }
+    struct DestinationInput { uint64 chainSelector; address vault; }
+
+    function processReport(address coin, uint8 score, bytes32 evidenceRoot)
+        external returns (bytes32 eventId, State resultState);
+    function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
+    function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
+}
+
 /**
  * StableGuardCREReceiver
  *
  * Receives ABI-encoded depeg reports from the StableGuard CRE workflow via
  * the KeystoneForwarder. Decodes and stores the latest composite signal state,
- * emitting events for offchain indexers.
+ * emitting events for offchain indexers, then drives the DepegEventRegistry
+ * state machine and executes an exposure-gated vault pause.
  *
- * Constructor arg (forwarder):
- *   Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88  (MockKeystoneForwarder, Sepolia)
- *   Production           : 0xF8344CFd5c43616a4366C34E3EEE75af79a74482  (KeystoneForwarder, Sepolia)
+ * Per-coin call sequence in onReport() (each call independently try/caught):
+ *   1. eventRegistry.processReport   — advance state machine
+ *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
+ *   3. vault.pause()                 — exposure-gated; outcome captured in bool
+ *   4. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
  *
- * Payload schema (matches main.ts encodeAbiParameters call):
- *   address[] coins, uint256[] prices, uint256[] deviationsBps,
- *   uint8[] signalLevels, bytes[] fullReports,
- *   uint8 compositeScore, uint8 marketStress, uint256 observedAt
+ * Constructor args:
+ *   forwarder         Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88
+ *                     Production           : 0xF8344CFd5c43616a4366C34E3EEE75af79a74482
+ *   exposureRegistry  ExposureRegistry that gates which vault/symbol pairs are tracked
+ *   eventRegistry     DepegEventRegistry (must transferController to this address after deploy)
+ *   vault             Target vault to pause on confirmed depeg
+ *   localChainSelector CCIP chain selector for the local chain (used as destination ID)
  */
 contract StableGuardCREReceiver {
-    address public immutable forwarder;
-    IExposureRegistry public immutable exposureRegistry;
-    address public immutable vault;
-    uint8   public immutable pauseThreshold;
+    address                public immutable forwarder;
+    IExposureRegistry      public immutable exposureRegistry;
+    IDepegEventRegistry    public immutable eventRegistry;
+    address                public immutable vault;
+    uint64                 public immutable localChainSelector;
 
     uint8   public lastCompositeScore;
     uint8   public lastMarketStress;
@@ -64,18 +86,24 @@ contract StableGuardCREReceiver {
     // the pause for that coin — this event is the only on-chain signal of that gap.
     event VaultExposureMissing(address indexed vault, bytes32 indexed symbol);
 
+    event RegistryUpdateFailed(address indexed coin, bytes reason);
+    event VaultPauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
+    event RegistryCallbackFailed(bytes32 indexed eventId, address indexed coin, bytes reason);
+
     error UnauthorizedForwarder(address caller);
 
     constructor(
         address _forwarder,
         address _exposureRegistry,
+        address _eventRegistry,
         address _vault,
-        uint8   _pauseThreshold
+        uint64  _localChainSelector
     ) {
-        forwarder         = _forwarder;
-        exposureRegistry  = IExposureRegistry(_exposureRegistry);
-        vault             = _vault;
-        pauseThreshold    = _pauseThreshold;
+        forwarder           = _forwarder;
+        exposureRegistry    = IExposureRegistry(_exposureRegistry);
+        eventRegistry       = IDepegEventRegistry(_eventRegistry);
+        vault               = _vault;
+        localChainSelector  = _localChainSelector;
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
@@ -119,17 +147,62 @@ contract StableGuardCREReceiver {
 
         emit DepegReport(idx, compositeScore, marketStress, observedAt);
 
-        // Exposure-gated vault pause: only pause if vault provably holds the alerted asset
-        if (compositeScore >= pauseThreshold) {
-            for (uint256 i = 0; i < coins.length; i++) {
-                if (signalLevels[i] >= 1) {
-                    bytes32 sym = bytes32(uint256(uint160(coins[i])));
-                    if (!exposureRegistry.isExposed(vault, sym)) {
-                        emit VaultExposureMissing(vault, sym);
-                        continue;
-                    }
-                    IPausable(vault).pause();
-                }
+        for (uint256 i = 0; i < coins.length; i++) {
+            address coin  = coins[i];
+            uint8   level = signalLevels[i];
+
+            // Call 1: advance state machine; skip this coin on any registry failure
+            bytes32 eventId;
+            IDepegEventRegistry.State newState;
+            try eventRegistry.processReport(coin, level, bytes32(0))
+                returns (bytes32 _eventId, IDepegEventRegistry.State _newState)
+            {
+                eventId  = _eventId;
+                newState = _newState;
+            } catch (bytes memory reason) {
+                emit RegistryUpdateFailed(coin, reason);
+                continue;
+            }
+
+            if (newState != IDepegEventRegistry.State.CONFIRMED_DEPEG) continue;
+
+            // Exposure gate: only protect vaults that demonstrably hold the asset
+            bytes32 sym = bytes32(uint256(uint160(coin)));
+            if (!exposureRegistry.isExposed(vault, sym)) {
+                emit VaultExposureMissing(vault, sym);
+                continue;
+            }
+
+            // Call 2: CONFIRMED_DEPEG → PROTECTION_PENDING; silent catch (may already
+            // be in-flight if a previous cycle fired before this callback arrived)
+            IDepegEventRegistry.DestinationInput[] memory dests =
+                new IDepegEventRegistry.DestinationInput[](1);
+            dests[0] = IDepegEventRegistry.DestinationInput({
+                chainSelector: localChainSelector,
+                vault:         vault
+            });
+            try eventRegistry.initiateProtection(eventId, dests) {
+                // fall through to pause
+            } catch {
+                continue;
+            }
+
+            // Call 3: pause vault; capture outcome so Call 4 reports honestly
+            bool paused = false;
+            try IPausable(vault).pause() {
+                paused = true;
+            } catch (bytes memory reason) {
+                emit VaultPauseFailed(vault, sym, reason);
+            }
+
+            // Call 4: close the destination slot with the honest result
+            IDepegEventRegistry.DestState dcState = paused
+                ? IDepegEventRegistry.DestState.COMPLETE
+                : IDepegEventRegistry.DestState.FAILED;
+            try eventRegistry.destinationCallback(eventId, 0, dcState) {
+                // ack
+            } catch (bytes memory reason) {
+                emit RegistryCallbackFailed(eventId, coin, reason);
             }
         }
     }

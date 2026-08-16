@@ -79,7 +79,6 @@ contract DepegEventRegistry {
 
     // ── Immutables ────────────────────────────────────────────────────────────
 
-    address public immutable controller;
     uint8   public immutable watchThreshold;      // min score to open a WATCH event
     uint8   public immutable confirmedThreshold;  // score for WATCH → CONFIRMED_DEPEG
     uint256 public immutable eventTTL;            // outer TTL for the entire event
@@ -88,6 +87,9 @@ contract DepegEventRegistry {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
+    // Mutable: deployer bootstraps with itself then calls transferController(receiver)
+    // once StableGuardCREReceiver is deployed (chicken-and-egg resolution).
+    address public controller;
     mapping(bytes32 => DepegEvent) private _events;
 
     /// Lookup table: coinKey → currently active (non-terminal) eventId.
@@ -105,10 +107,12 @@ contract DepegEventRegistry {
     event ProtectionInitiated(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event RecoveryInitiated(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event DestinationUpdated(bytes32 indexed eventId, uint256 indexed destIndex, DestState newState);
+    event ControllerTransferred(address indexed oldController, address indexed newController);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
     error Unauthorized();
+    error ZeroAddress();
     error EventNotFound();
     error AlreadyTerminal();
     error InvalidTransition(State current);
@@ -137,6 +141,18 @@ contract DepegEventRegistry {
         eventTTL           = _eventTTL;
         pendingTTL         = _pendingTTL;
         recoveryCooldown   = _recoveryCooldown;
+    }
+
+    // ── transferController ────────────────────────────────────────────────────
+
+    /// @notice Transfer the controller role. Used post-deployment to hand control
+    ///         to StableGuardCREReceiver once its address is known.
+    function transferController(address newController) external {
+        if (msg.sender != controller) revert Unauthorized();
+        if (newController == address(0)) revert ZeroAddress();
+        address old = controller;
+        controller = newController;
+        emit ControllerTransferred(old, newController);
     }
 
     // ── processReport ─────────────────────────────────────────────────────────
