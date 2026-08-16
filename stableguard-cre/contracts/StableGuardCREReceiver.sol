@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+interface IExposureRegistry {
+    function isExposed(address vault, bytes32 symbol) external view returns (bool);
+}
+
+interface IPausable {
+    function pause() external;
+}
+
 /**
  * StableGuardCREReceiver
  *
@@ -19,6 +27,9 @@ pragma solidity 0.8.24;
  */
 contract StableGuardCREReceiver {
     address public immutable forwarder;
+    IExposureRegistry public immutable exposureRegistry;
+    address public immutable vault;
+    uint8   public immutable pauseThreshold;
 
     uint8   public lastCompositeScore;
     uint8   public lastMarketStress;
@@ -48,10 +59,23 @@ contract StableGuardCREReceiver {
         uint8   signalLevel
     );
 
+    // TODO (ops): index and alert on this event before production deployment.
+    // A forgotten ExposureRegistry.registerExposure() call will silently skip
+    // the pause for that coin — this event is the only on-chain signal of that gap.
+    event VaultExposureMissing(address indexed vault, bytes32 indexed symbol);
+
     error UnauthorizedForwarder(address caller);
 
-    constructor(address _forwarder) {
-        forwarder = _forwarder;
+    constructor(
+        address _forwarder,
+        address _exposureRegistry,
+        address _vault,
+        uint8   _pauseThreshold
+    ) {
+        forwarder         = _forwarder;
+        exposureRegistry  = IExposureRegistry(_exposureRegistry);
+        vault             = _vault;
+        pauseThreshold    = _pauseThreshold;
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
@@ -94,6 +118,20 @@ contract StableGuardCREReceiver {
         }
 
         emit DepegReport(idx, compositeScore, marketStress, observedAt);
+
+        // Exposure-gated vault pause: only pause if vault provably holds the alerted asset
+        if (compositeScore >= pauseThreshold) {
+            for (uint256 i = 0; i < coins.length; i++) {
+                if (signalLevels[i] >= 1) {
+                    bytes32 sym = bytes32(uint256(uint160(coins[i])));
+                    if (!exposureRegistry.isExposed(vault, sym)) {
+                        emit VaultExposureMissing(vault, sym);
+                        continue;
+                    }
+                    IPausable(vault).pause();
+                }
+            }
+        }
     }
 
     function getLastCoins() external view returns (CoinSignal[] memory) {
