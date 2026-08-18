@@ -17,7 +17,8 @@ pragma solidity 0.8.24;
 ///                                        PARTIALLY_PROTECTED
 ///                                          └─(retry+DC, all complete)──────► PROTECTED
 ///                                        PROTECTED
-///                                          └─(initiateRecovery)─► RECOVERY_PENDING
+///                                          ├─(initiateRecovery)─────────────────────────────────────► RECOVERY_PENDING
+///                                          └─(processReport×stabilityWindow stable)─[auto-recovery]─► RECOVERY_PENDING
 ///                                                                   ├─(allSettled+cooldown, all)─► NORMAL [terminal]
 ///                                                                   ├─(allSettled, partial)──────► PARTIALLY_RECOVERED
 ///                                                                   └─(allSettled, none)─────────► FAILED  [terminal]
@@ -69,6 +70,7 @@ contract DepegEventRegistry {
         address       coin;
         State         state;
         uint8         compositeScore;
+        uint8         stableCount;    // consecutive stable reports while PROTECTED; hard-reset on any non-stable
         bytes32       evidenceRoot;
         uint256       createdAt;
         uint256       observedAt;
@@ -81,6 +83,7 @@ contract DepegEventRegistry {
 
     uint8   public immutable watchThreshold;      // min score to open a WATCH event
     uint8   public immutable confirmedThreshold;  // score for WATCH → CONFIRMED_DEPEG
+    uint8   public immutable stabilityWindow;     // consecutive stable reports required for auto-recovery
     uint256 public immutable eventTTL;            // outer TTL for the entire event
     uint256 public immutable pendingTTL;          // TTL for PROTECTION_PENDING / RECOVERY_PENDING only
     uint256 public immutable recoveryCooldown;    // min time in RECOVERY_PENDING before NORMAL allowed
@@ -106,6 +109,7 @@ contract DepegEventRegistry {
     event EventTerminated(bytes32 indexed eventId, address indexed coin, State terminal);
     event ProtectionInitiated(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event RecoveryInitiated(bytes32 indexed eventId, address indexed coin, uint256 destCount);
+    event RecoveryTrackingResumed(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event DestinationUpdated(bytes32 indexed eventId, uint256 indexed destIndex, DestState newState);
     event ControllerTransferred(address indexed oldController, address indexed newController);
 
@@ -131,6 +135,7 @@ contract DepegEventRegistry {
         address _controller,
         uint8   _watchThreshold,
         uint8   _confirmedThreshold,
+        uint8   _stabilityWindow,
         uint256 _eventTTL,
         uint256 _pendingTTL,
         uint256 _recoveryCooldown
@@ -138,6 +143,7 @@ contract DepegEventRegistry {
         controller         = _controller;
         watchThreshold     = _watchThreshold;
         confirmedThreshold = _confirmedThreshold;
+        stabilityWindow    = _stabilityWindow;
         eventTTL           = _eventTTL;
         pendingTTL         = _pendingTTL;
         recoveryCooldown   = _recoveryCooldown;
@@ -321,6 +327,52 @@ contract DepegEventRegistry {
         emit RecoveryInitiated(eventId, ev.coin, dests.length);
     }
 
+    // ── resumeProtectionTracking ──────────────────────────────────────────────
+
+    /// @notice Creates a new PROTECTED-state event for a coin that has no active
+    ///         event, when the prior event expired before auto-recovery could fire.
+    ///         Destinations are set to COMPLETE — protection is already in place.
+    ///         processReport will then accumulate stable reports and trigger
+    ///         _applyAutoRecovery after stabilityWindow consecutive stable reports.
+    ///         Called by the controller (CRE receiver) automatically when it
+    ///         detects: stable score, no active event, vault still paused.
+    function resumeProtectionTracking(
+        address                     coin,
+        bytes32                     evidenceRoot,
+        DestinationInput[] calldata dests
+    ) external returns (bytes32 eventId) {
+        if (msg.sender != controller) revert Unauthorized();
+        if (dests.length == 0)        revert NoDestinations();
+
+        bytes32 coinKey  = keccak256(abi.encode(coin));
+        bytes32 activeId = activeEventId[coinKey];
+        if (activeId != bytes32(0) && !_isTerminal(_events[activeId].state)) {
+            revert InvalidTransition(_events[activeId].state);
+        }
+
+        eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
+        DepegEvent storage ev = _events[eventId];
+        ev.coin                  = coin;
+        ev.state                 = State.PROTECTED;
+        ev.compositeScore        = 0;
+        ev.evidenceRoot          = evidenceRoot;
+        ev.createdAt             = block.timestamp;
+        ev.observedAt            = block.timestamp;
+        ev.protectionInitiatedAt = block.timestamp;
+
+        for (uint256 i; i < dests.length; ) {
+            ev.destinations.push(Destination({
+                chainSelector: dests[i].chainSelector,
+                vault:         dests[i].vault,
+                state:         DestState.COMPLETE   // protection already confirmed
+            }));
+            unchecked { ++i; }
+        }
+
+        activeEventId[coinKey] = eventId;
+        emit RecoveryTrackingResumed(eventId, coin, dests.length);
+    }
+
     // ── retryFailedDestinations ───────────────────────────────────────────────
 
     /// @notice DG4/DG5: re-mark specific FAILED destinations as PENDING for retry.
@@ -447,6 +499,21 @@ contract DepegEventRegistry {
             return State.EXPIRED;
         }
 
+        // GA: auto-recovery gate — count consecutive stable reports while PROTECTED.
+        if (ev.state == State.PROTECTED) {
+            if (score < watchThreshold) {
+                if (ev.stableCount + 1 >= stabilityWindow) {
+                    ev.stableCount = 0;
+                    _applyAutoRecovery(eventId, ev);
+                    return State.RECOVERY_PENDING;
+                }
+                ev.stableCount++;
+            } else {
+                ev.stableCount = 0;  // hard reset on any non-stable report
+            }
+            return State.PROTECTED;
+        }
+
         // Score transitions apply only to WATCH and CONFIRMED_DEPEG.
         // All states from PROTECTION_PENDING onward require explicit action calls.
         if (ev.state != State.WATCH && ev.state != State.CONFIRMED_DEPEG) {
@@ -466,6 +533,19 @@ contract DepegEventRegistry {
         }
 
         return ev.state;
+    }
+
+    // ── Internal: auto-recovery ───────────────────────────────────────────────
+
+    function _applyAutoRecovery(bytes32 eventId, DepegEvent storage ev) internal {
+        for (uint256 i; i < ev.destinations.length; ) {
+            ev.destinations[i].state = DestState.PENDING;
+            unchecked { ++i; }
+        }
+        ev.recoveryInitiatedAt = block.timestamp;
+        ev.state               = State.RECOVERY_PENDING;
+        emit EventAdvanced(eventId, ev.coin, State.PROTECTED, State.RECOVERY_PENDING);
+        emit RecoveryInitiated(eventId, ev.coin, ev.destinations.length);
     }
 
     // ── Internal: destination completion evaluation ────────────────────────────
