@@ -6,9 +6,11 @@ const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const LOCAL_CHAIN_SELECTOR = 1n;
 
-// WATCH_THRESHOLD=1, CONFIRMED_THRESHOLD=1: signalLevel=1 → immediate CONFIRMED_DEPEG
+// WATCH_THRESHOLD=1, CONFIRMED_THRESHOLD=2: matches depeg-event-registry.test.js fixture.
+// signalLevel=2 (HEDGE) reaches CONFIRMED_DEPEG in a single processReport call from NORMAL
+// (G0 creates WATCH, _applyScoreTransitions immediately advances via G2 — one transaction).
 const WATCH_THRESHOLD      = 1;
-const CONFIRMED_THRESHOLD  = 1;
+const CONFIRMED_THRESHOLD  = 2;
 const EVENT_TTL            = 86400n;  // 24 h
 const PENDING_TTL          = 3600n;   // 1 h
 const RECOVERY_COOLDOWN    = 900n;    // 15 min
@@ -72,13 +74,20 @@ describe("ExposureRegistry binding", function () {
         await eventRegistry.connect(admin).transferController(await receiver.getAddress());
     });
 
+    it("reverts when caller is not the registered forwarder", async function () {
+        const report = encodeReport([coinA.address], [2], 2);
+        await expect(receiver.connect(admin).onReport("0x", report))
+            .to.be.revertedWithCustomError(receiver, "UnauthorizedForwarder")
+            .withArgs(admin.address);
+    });
+
     it("emits VaultExposureMissing and does not pause when vault holds B but alert is for A", async function () {
         const vaultAddr = await vault.getAddress();
         await registry
             .connect(admin)
             .registerExposure(vaultAddr, addrToBytes32(coinB.address));
 
-        const report = encodeReport([coinA.address], [1], 2);
+        const report = encodeReport([coinA.address], [2], 2);
         await expect(receiver.connect(forwarder).onReport("0x", report))
             .to.emit(receiver, "VaultExposureMissing")
             .withArgs(vaultAddr, addrToBytes32(coinA.address));
@@ -91,7 +100,7 @@ describe("ExposureRegistry binding", function () {
             .connect(admin)
             .registerExposure(await vault.getAddress(), addrToBytes32(coinA.address));
 
-        const report = encodeReport([coinA.address], [1], 2);
+        const report = encodeReport([coinA.address], [2], 2);
         await receiver.connect(forwarder).onReport("0x", report);
 
         expect(await vault.paused()).to.equal(true);
@@ -99,7 +108,7 @@ describe("ExposureRegistry binding", function () {
 
     it("emits VaultExposureMissing and does not pause when vault has no exposure registered", async function () {
         const vaultAddr = await vault.getAddress();
-        const report = encodeReport([coinA.address], [1], 2);
+        const report = encodeReport([coinA.address], [2], 2);
         await expect(receiver.connect(forwarder).onReport("0x", report))
             .to.emit(receiver, "VaultExposureMissing")
             .withArgs(vaultAddr, addrToBytes32(coinA.address));
@@ -115,7 +124,7 @@ describe("ExposureRegistry binding", function () {
         const symA = addrToBytes32(coinA.address);
         await registry.connect(admin).registerExposure(vaultAddr, symA);
 
-        const report = encodeReport([coinA.address], [1], 2);
+        const report = encodeReport([coinA.address], [2], 2);
 
         // First alert: CONFIRMED_DEPEG → PROTECTION_PENDING → vault paused → PROTECTED
         await receiver.connect(forwarder).onReport("0x", report);
@@ -136,7 +145,7 @@ describe("ExposureRegistry binding", function () {
         const symA = addrToBytes32(coinA.address);
         await registry.connect(admin).registerExposure(vaultAddr, symA);
 
-        const report = encodeReport([coinA.address], [1], 2);
+        const report = encodeReport([coinA.address], [2], 2);
 
         // First alert: new WATCH event → CONFIRMED_DEPEG → PROTECTION_PENDING →
         // vault paused → PROTECTED.
@@ -171,7 +180,7 @@ describe("ExposureRegistry binding", function () {
         // Two coins alerting in one report
         const report = encodeReport(
             [coinA.address, coinB.address],
-            [1, 1],
+            [2, 2],
             2
         );
 
