@@ -7,6 +7,8 @@ interface IExposureRegistry {
 
 interface IPausable {
     function pause() external;
+    function unpause() external;
+    function paused() external view returns (bool);
 }
 
 interface IDepegEventRegistry {
@@ -22,6 +24,9 @@ interface IDepegEventRegistry {
         external returns (bytes32 eventId, State resultState);
     function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
     function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
+    function resumeProtectionTracking(address coin, bytes32 evidenceRoot, DestinationInput[] calldata dests)
+        external returns (bytes32 eventId);
+    function finalizeRecovery(bytes32 eventId) external;
 }
 
 /**
@@ -88,7 +93,9 @@ contract StableGuardCREReceiver {
 
     event RegistryUpdateFailed(address indexed coin, bytes reason);
     event VaultPauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
+    event VaultUnpauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
     event RegistryCallbackFailed(bytes32 indexed eventId, address indexed coin, bytes reason);
+    event RecoveryResumeFailed(address indexed coin, bytes reason);
 
     error UnauthorizedForwarder(address caller);
 
@@ -164,10 +171,53 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
+            bytes32 sym = bytes32(uint256(uint160(coin)));
+
+            // ── Auto-recovery: vault unpause ──────────────────────────────────────
+            // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
+            // and on subsequent cycles until the destination slot is settled.
+            if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
+                if (IPausable(vault).paused()) {
+                    bool unpaused = false;
+                    try IPausable(vault).unpause() {
+                        unpaused = true;
+                    } catch (bytes memory reason) {
+                        emit VaultUnpauseFailed(vault, sym, reason);
+                    }
+                    IDepegEventRegistry.DestState cbState = unpaused
+                        ? IDepegEventRegistry.DestState.COMPLETE
+                        : IDepegEventRegistry.DestState.FAILED;
+                    try eventRegistry.destinationCallback(eventId, 0, cbState) { }
+                    catch (bytes memory reason) {
+                        emit RegistryCallbackFailed(eventId, coin, reason);
+                    }
+                }
+                // Permissionless; silent if cooldown not yet elapsed
+                try eventRegistry.finalizeRecovery(eventId) { } catch { }
+                continue;
+            }
+
+            // ── Recovery continuation: re-open tracking on paused vault ───────────
+            // Fires when the prior PROTECTED event expired before stableCount
+            // reached stabilityWindow. The vault is still paused and needs
+            // a fresh PROTECTED event to re-arm auto-recovery.
+            if (eventId == bytes32(0) && IPausable(vault).paused()) {
+                IDepegEventRegistry.DestinationInput[] memory resumeDests =
+                    new IDepegEventRegistry.DestinationInput[](1);
+                resumeDests[0] = IDepegEventRegistry.DestinationInput({
+                    chainSelector: localChainSelector,
+                    vault:         vault
+                });
+                try eventRegistry.resumeProtectionTracking(coin, bytes32(0), resumeDests) { }
+                catch (bytes memory reason) {
+                    emit RecoveryResumeFailed(coin, reason);
+                }
+                continue;
+            }
+
             if (newState != IDepegEventRegistry.State.CONFIRMED_DEPEG) continue;
 
             // Exposure gate: only protect vaults that demonstrably hold the asset
-            bytes32 sym = bytes32(uint256(uint160(coin)));
             if (!exposureRegistry.isExposed(vault, sym)) {
                 emit VaultExposureMissing(vault, sym);
                 continue;
@@ -188,15 +238,15 @@ contract StableGuardCREReceiver {
             }
 
             // Call 3: pause vault; capture outcome so Call 4 reports honestly
-            bool paused = false;
+            bool pauseResult = false;
             try IPausable(vault).pause() {
-                paused = true;
+                pauseResult = true;
             } catch (bytes memory reason) {
                 emit VaultPauseFailed(vault, sym, reason);
             }
 
             // Call 4: close the destination slot with the honest result
-            IDepegEventRegistry.DestState dcState = paused
+            IDepegEventRegistry.DestState dcState = pauseResult
                 ? IDepegEventRegistry.DestState.COMPLETE
                 : IDepegEventRegistry.DestState.FAILED;
             try eventRegistry.destinationCallback(eventId, 0, dcState) {
