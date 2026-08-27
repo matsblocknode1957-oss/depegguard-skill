@@ -46,7 +46,7 @@ const S = {
 };
 
 describe("ExposureRegistry binding", function () {
-    let receiver, registry, eventRegistry, vault;
+    let receiver, registry, eventRegistry, vault, holdLedger;
     let forwarder, admin, coinA, coinB;
 
     beforeEach(async function () {
@@ -70,17 +70,28 @@ describe("ExposureRegistry binding", function () {
             RECOVERY_COOLDOWN
         );
 
+        // Deploy hold ledger with admin as initial coordinator; transferCoordinator after receiver deploy
+        const ProtectionHoldLedger = await ethers.getContractFactory("ProtectionHoldLedger");
+        holdLedger = await ProtectionHoldLedger.deploy(admin.address);
+
         const StableGuardCREReceiver = await ethers.getContractFactory("StableGuardCREReceiver");
         receiver = await StableGuardCREReceiver.deploy(
             forwarder.address,
             await registry.getAddress(),
             await eventRegistry.getAddress(),
             await vault.getAddress(),
-            LOCAL_CHAIN_SELECTOR
+            LOCAL_CHAIN_SELECTOR,
+            await holdLedger.getAddress()
         );
+
+        // Wire holdLedger into registry while admin is still controller
+        await eventRegistry.connect(admin).setHoldLedger(await holdLedger.getAddress());
 
         // Hand control to the receiver (resolves chicken-and-egg)
         await eventRegistry.connect(admin).transferController(await receiver.getAddress());
+
+        // Hand ledger coordination to the receiver so it can acquire/release holds
+        await holdLedger.connect(admin).transferCoordinator(await receiver.getAddress());
     });
 
     it("reverts when caller is not the registered forwarder", async function () {

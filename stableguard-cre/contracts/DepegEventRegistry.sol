@@ -28,6 +28,17 @@ pragma solidity 0.8.24;
 ///   Any non-terminal state → EXPIRED  when  block.timestamp ≥ createdAt + eventTTL  (highest priority)
 ///   PROTECTION_PENDING / RECOVERY_PENDING → FAILED  when  pendingTTL elapsed
 ///   WATCH / CONFIRMED_DEPEG → SUPERSEDED  via  supersede()  (blocked at PROTECTION_PENDING and beyond)
+interface IProtectionHoldLedger {
+    struct ProtectionHold {
+        bytes32 holdId;
+        bytes32 rootIncidentId;
+        bytes32 assetId;
+        address vault;
+        bool    active;
+    }
+    function getHold(bytes32 holdId) external view returns (ProtectionHold memory);
+}
+
 contract DepegEventRegistry {
 
     // ── Enums ─────────────────────────────────────────────────────────────────
@@ -94,6 +105,7 @@ contract DepegEventRegistry {
     // Mutable: deployer bootstraps with itself then calls transferController(receiver)
     // once StableGuardCREReceiver is deployed (chicken-and-egg resolution).
     address public controller;
+    IProtectionHoldLedger public holdLedger;
     mapping(bytes32 => DepegEvent) private _events;
 
     /// Lookup table: coinKey → currently active (non-terminal) eventId.
@@ -129,6 +141,13 @@ contract DepegEventRegistry {
     error NotYetExpired();
     error PendingNotTimedOut();
     error RecoveryConditionsNotMet();
+    error HoldLedgerNotSet();
+    error HoldInactive(bytes32 holdId);
+    error HoldVaultMismatch(bytes32 holdId, address holdVault, address resumeVault);
+    error HoldAssetMismatch(bytes32 holdId, bytes32 holdAsset, bytes32 coinAsset);
+    error HoldIncidentMismatch(bytes32 holdId, bytes32 holdRoot, bytes32 eventRoot);
+    error EventAssetMismatch(bytes32 eventId, address expected, address got);
+    error NotTerminalContinuable(bytes32 eventId, State state);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -160,6 +179,14 @@ contract DepegEventRegistry {
         address old = controller;
         controller = newController;
         emit ControllerTransferred(old, newController);
+    }
+
+    // ── setHoldLedger ─────────────────────────────────────────────────────────
+
+    function setHoldLedger(address newHoldLedger) external {
+        if (msg.sender != controller) revert Unauthorized();
+        if (newHoldLedger == address(0)) revert ZeroAddress();
+        holdLedger = IProtectionHoldLedger(newHoldLedger);
     }
 
     // ── processReport ─────────────────────────────────────────────────────────
@@ -330,31 +357,69 @@ contract DepegEventRegistry {
 
     // ── resumeProtectionTracking ──────────────────────────────────────────────
 
-    /// @notice Creates a new PROTECTED-state event for a coin that has no active
-    ///         event, when the prior event expired before auto-recovery could fire.
-    ///         Destinations are set to COMPLETE — protection is already in place.
-    ///         processReport will then accumulate stable reports and trigger
-    ///         _applyAutoRecovery after stabilityWindow consecutive stable reports.
-    ///         Called by the controller (CRE receiver) automatically when it
-    ///         detects: stable score, no active event, vault still paused.
+    /// @notice Creates a new PROTECTED-state event for a coin whose prior PROTECTED
+    ///         event expired before auto-recovery could fire, while the vault remains
+    ///         physically paused. Requires explicit lineage proof via six checks:
+    ///         (1) hold active, (2) hold vault matches destination, (3) hold asset
+    ///         matches coin, (4) hold and expired event share rootIncidentId,
+    ///         (5) expired event coin matches coin param, (6) expired event is EXPIRED
+    ///         (not FAILED, SUPERSEDED, or NORMAL).
     function resumeProtectionTracking(
         address                     coin,
         bytes32                     evidenceRoot,
-        DestinationInput[] calldata dests
+        DestinationInput[] calldata dests,
+        bytes32                     expiredEventId,
+        bytes32                     holdId
     ) external returns (bytes32 eventId) {
         if (msg.sender != controller) revert Unauthorized();
         if (dests.length == 0)        revert NoDestinations();
+        if (address(holdLedger) == address(0)) revert HoldLedgerNotSet();
 
+        // Guard: no active non-terminal event for this coin
         bytes32 coinKey  = keccak256(abi.encode(coin));
         bytes32 activeId = activeEventId[coinKey];
         if (activeId != bytes32(0) && !_isTerminal(_events[activeId].state)) {
             revert InvalidTransition(_events[activeId].state);
         }
 
+        // ── Six lineage checks ───────────────────────────────────────────────
+
+        IProtectionHoldLedger.ProtectionHold memory hold = holdLedger.getHold(holdId);
+
+        // Check 1: hold must still be active
+        if (!hold.active) revert HoldInactive(holdId);
+
+        // Check 2: hold belongs to the vault being resumed
+        address resumeVault = dests[0].vault;
+        if (hold.vault != resumeVault)
+            revert HoldVaultMismatch(holdId, hold.vault, resumeVault);
+
+        // Check 3: hold covers this specific asset
+        bytes32 assetId = bytes32(uint256(uint160(coin)));
+        if (hold.assetId != assetId)
+            revert HoldAssetMismatch(holdId, hold.assetId, assetId);
+
+        DepegEvent storage parentEv = _events[expiredEventId];
+        _requireExists(parentEv);
+
+        // Check 4: hold and expired event share the same originating incident
+        if (hold.rootIncidentId != parentEv.rootIncidentId)
+            revert HoldIncidentMismatch(holdId, hold.rootIncidentId, parentEv.rootIncidentId);
+
+        // Check 5: expired event was tracking this same coin (independent belt-and-suspenders)
+        if (parentEv.coin != coin)
+            revert EventAssetMismatch(expiredEventId, coin, parentEv.coin);
+
+        // Check 6: parent must be EXPIRED — FAILED, SUPERSEDED, and NORMAL are not continuable
+        if (!_isTerminalContinuable(parentEv.state))
+            revert NotTerminalContinuable(expiredEventId, parentEv.state);
+
+        // ── Create successor PROTECTED event, inheriting the incident root ──
+
         eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
         DepegEvent storage ev = _events[eventId];
         ev.coin                  = coin;
-        ev.rootIncidentId        = eventId; // Step 3 will inherit from expired parent's rootIncidentId
+        ev.rootIncidentId        = parentEv.rootIncidentId; // inherit from expired parent
         ev.state                 = State.PROTECTED;
         ev.compositeScore        = 0;
         ev.evidenceRoot          = evidenceRoot;
@@ -673,6 +738,10 @@ contract DepegEventRegistry {
             || s == State.EXPIRED
             || s == State.FAILED
             || s == State.SUPERSEDED;
+    }
+
+    function _isTerminalContinuable(State s) internal pure returns (bool) {
+        return s == State.EXPIRED; // only EXPIRED justifies a resumption; FAILED/SUPERSEDED/NORMAL do not
     }
 
     function _isProtectedFamily(State s) internal pure returns (bool) {

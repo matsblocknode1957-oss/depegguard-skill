@@ -56,6 +56,12 @@ contract ProtectionHoldLedger {
         coordinator = _coordinator;
     }
 
+    // ── getHold ───────────────────────────────────────────────────────────────
+
+    function getHold(bytes32 holdId) external view returns (ProtectionHold memory) {
+        return holds[holdId];
+    }
+
     // ── transferCoordinator ───────────────────────────────────────────────────
 
     function transferCoordinator(address newCoordinator) external {

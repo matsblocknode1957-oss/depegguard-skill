@@ -41,7 +41,7 @@ function dest(chainSelector, vault) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 describe("DepegEventRegistry", function () {
-    let registry;
+    let registry, ledger;
     let controller, other;
     let coinA, coinB;
 
@@ -58,6 +58,11 @@ describe("DepegEventRegistry", function () {
             PENDING_TTL,
             RECOVERY_COOLDOWN
         );
+
+        // Deploy ledger with controller as coordinator; wire into registry
+        const LedgerFactory = await ethers.getContractFactory("ProtectionHoldLedger");
+        ledger = await LedgerFactory.deploy(controller.address);
+        await registry.connect(controller).setHoldLedger(await ledger.getAddress());
     });
 
     // ── Shared helpers that use the deployed registry ──────────────────────────
@@ -213,18 +218,33 @@ describe("DepegEventRegistry", function () {
             expect(evSecond.rootIncidentId).to.not.equal(firstId);
         });
 
-        it("resumeProtectionTracking produces an event with rootIncidentId == its own eventId (Step 1 behaviour)", async function () {
-            const dests = [dest(1, ethers.Wallet.createRandom().address)];
+        it("resumeProtectionTracking inherits rootIncidentId from the expired parent event", async function () {
+            // Expire a PROTECTED event and acquire a hold
+            const expiredId = await toProtected(coinA.address, 1);
+            await time.increase(EVENT_TTL + 1);
+            await registry.settleExpired(expiredId);
+            const parentEv = await registry.getDepegEvent(expiredId);
+
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx0 = await ledger.connect(controller).acquire(resumeVaultAddr, parentEv.rootIncidentId, assetId);
+            const r0 = await tx0.wait();
+            const holdId = r0.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired").args.holdId;
+
             const tx = await registry.connect(controller).resumeProtectionTracking(
-                coinA.address, evidence(coinA.address, 0), dests
+                coinA.address, evidence(coinA.address, 0),
+                [dest(1, resumeVaultAddr)], expiredId, holdId
             );
             const receipt = await tx.wait();
-            const evt = receipt.logs
+            const resumedId = receipt.logs
                 .map(l => { try { return registry.interface.parseLog(l); } catch { return null; } })
-                .find(e => e && e.name === "RecoveryTrackingResumed");
-            const resumedId = evt.args.eventId;
+                .find(e => e && e.name === "RecoveryTrackingResumed").args.eventId;
             const ev = await registry.getDepegEvent(resumedId);
-            expect(ev.rootIncidentId).to.equal(resumedId);
+            // rootIncidentId must be inherited from the parent, not set to resumedId
+            expect(ev.rootIncidentId).to.equal(parentEv.rootIncidentId);
+            expect(ev.rootIncidentId).to.not.equal(resumedId);
         });
     });
 
@@ -899,35 +919,36 @@ describe("DepegEventRegistry", function () {
     // ── resumeProtectionTracking ──────────────────────────────────────────────
 
     describe("resumeProtectionTracking", function () {
-        it("creates a PROTECTED event with COMPLETE destinations when no active event", async function () {
-            await registry.connect(controller).resumeProtectionTracking(
-                coinA.address,
-                evidence(coinA.address, 0),
-                [dest(1, other.address)]
-            );
-            const id = await activeId(coinA.address);
-            expect(id).to.not.equal(ethers.ZeroHash);
-            expect(await stateOf(id)).to.equal(S.PROTECTED);
-            expect(await destStateOf(id, 0)).to.equal(DS.COMPLETE);
-        });
 
-        it("emits RecoveryTrackingResumed", async function () {
-            await expect(
-                registry.connect(controller).resumeProtectionTracking(
-                    coinA.address,
-                    evidence(coinA.address, 0),
-                    [dest(1, other.address)]
-                )
-            ).to.emit(registry, "RecoveryTrackingResumed")
-             .withArgs(anyValue, coinA.address, 1n);
-        });
+        // Helper: expire a PROTECTED event and acquire a hold, returning everything
+        // needed to call resumeProtectionTracking with valid lineage.
+        async function setupForResume(coin) {
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const expiredId = await toProtected(coin, 1);
+            await time.increase(EVENT_TTL + 1);
+            await registry.settleExpired(expiredId);
+
+            const ev = await registry.getDepegEvent(expiredId);
+            const assetId = ethers.zeroPadValue(coin, 32);
+            const tx = await ledger.connect(controller).acquire(
+                resumeVaultAddr, ev.rootIncidentId, assetId
+            );
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
+            const resumeDests = [dest(1, resumeVaultAddr)];
+            return { expiredId, holdId, resumeDests, resumeVaultAddr };
+        }
+
+        // ── guards (pre-lineage) ──────────────────────────────────────────────
 
         it("reverts from non-controller", async function () {
             await expect(
                 registry.connect(other).resumeProtectionTracking(
-                    coinA.address,
-                    evidence(coinA.address, 0),
-                    [dest(1, other.address)]
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, other.address)], ethers.ZeroHash, ethers.ZeroHash
                 )
             ).to.be.revertedWithCustomError(registry, "Unauthorized");
         });
@@ -935,44 +956,252 @@ describe("DepegEventRegistry", function () {
         it("reverts with empty destinations", async function () {
             await expect(
                 registry.connect(controller).resumeProtectionTracking(
-                    coinA.address,
-                    evidence(coinA.address, 0),
-                    []
+                    coinA.address, evidence(coinA.address, 0),
+                    [], ethers.ZeroHash, ethers.ZeroHash
                 )
             ).to.be.revertedWithCustomError(registry, "NoDestinations");
         });
 
-        it("reverts when active non-terminal event exists", async function () {
+        it("reverts HoldLedgerNotSet when holdLedger is not configured on the registry", async function () {
+            const Factory = await ethers.getContractFactory("DepegEventRegistry");
+            const fresh = await Factory.deploy(
+                controller.address, WATCH_THRESHOLD, CONFIRMED_THRESHOLD,
+                STABILITY_WINDOW, EVENT_TTL, PENDING_TTL, RECOVERY_COOLDOWN
+            );
+            await expect(
+                fresh.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, other.address)], ethers.ZeroHash, ethers.ZeroHash
+                )
+            ).to.be.revertedWithCustomError(fresh, "HoldLedgerNotSet");
+        });
+
+        it("reverts InvalidTransition when active non-terminal event exists", async function () {
             await report(coinA.address, WATCH_THRESHOLD);
             await expect(
                 registry.connect(controller).resumeProtectionTracking(
-                    coinA.address,
-                    evidence(coinA.address, 0),
-                    [dest(1, other.address)]
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, other.address)], ethers.ZeroHash, ethers.ZeroHash
                 )
             ).to.be.revertedWithCustomError(registry, "InvalidTransition");
         });
 
-        it("succeeds after prior event reaches NORMAL (terminal)", async function () {
-            await report(coinA.address, WATCH_THRESHOLD);
-            const firstId = await activeId(coinA.address);
-            await report(coinA.address, 0); // G3: WATCH → NORMAL
-            expect(await stateOf(firstId)).to.equal(S.NORMAL);
+        // ── B-02 lineage checks ───────────────────────────────────────────────
+
+        it("B-02 check 1: reverts HoldInactive when hold has been released", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            await ledger.connect(controller).release(holdId);
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0), resumeDests, expiredId, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "HoldInactive").withArgs(holdId);
+        });
+
+        it("B-02 check 2: reverts HoldVaultMismatch when hold vault doesn't match dests[0].vault", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            const wrongVaultDests = [dest(1, ethers.Wallet.createRandom().address)];
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0), wrongVaultDests, expiredId, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "HoldVaultMismatch");
+        });
+
+        it("B-02 check 3: reverts HoldAssetMismatch when hold asset doesn't match coin", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            // Pass coinB but hold was acquired for coinA's assetId
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinB.address, evidence(coinB.address, 0), resumeDests, expiredId, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "HoldAssetMismatch");
+        });
+
+        it("B-02 check 4: reverts HoldIncidentMismatch — expired A event must not authorize B's continuation", async function () {
+            // Incident A: coinA expires
+            const { expiredId: expiredA, resumeVaultAddr } = await setupForResume(coinA.address);
+
+            // Incident B: a separate expired event for coinA (different rootIncidentId)
+            const expiredB = await toProtected(coinA.address, 1);
+            await time.increase(EVENT_TTL + 1);
+            await registry.settleExpired(expiredB);
+            const evB = await registry.getDepegEvent(expiredB);
+
+            // Acquire a hold for incident B
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, evB.rootIncidentId, assetId);
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdB = parsed.args.holdId;
+
+            // Try to use incident B's hold against incident A's expired event
+            const resumeDests = [dest(1, resumeVaultAddr)];
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0), resumeDests, expiredA, holdB
+                )
+            ).to.be.revertedWithCustomError(registry, "HoldIncidentMismatch");
+        });
+
+        it("B-02 check 5: reverts EventAssetMismatch — expired event coin doesn't match coin param", async function () {
+            // Expire an event for coinA
+            const expiredA = await toProtected(coinA.address, 1);
+            await time.increase(EVENT_TTL + 1);
+            await registry.settleExpired(expiredA);
+            const evA = await registry.getDepegEvent(expiredA);
+
+            // Acquire a hold with coinB's assetId but coinA's rootIncidentId
+            // This lets checks 3 and 4 pass when we call with coinB, but check 5 catches
+            // that the expired event (for coinA) doesn't match coinB.
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const coinBAssetId = ethers.zeroPadValue(coinB.address, 32);
+            const tx = await ledger.connect(controller).acquire(
+                resumeVaultAddr, evA.rootIncidentId, coinBAssetId
+            );
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
 
             await expect(
                 registry.connect(controller).resumeProtectionTracking(
-                    coinA.address,
-                    evidence(coinA.address, 0),
-                    [dest(1, other.address)]
+                    coinB.address, evidence(coinB.address, 0),
+                    [dest(1, resumeVaultAddr)], expiredA, holdId
                 )
-            ).to.emit(registry, "RecoveryTrackingResumed");
+            ).to.be.revertedWithCustomError(registry, "EventAssetMismatch");
+        });
+
+        it("B-02 check 6: reverts NotTerminalContinuable for FAILED parent event", async function () {
+            // Drive to FAILED: all destinations fail
+            const id = await toProtectionPending(coinA.address, 1);
+            await registry.connect(controller).destinationCallback(id, 0, DS.FAILED);
+            expect(await stateOf(id)).to.equal(S.FAILED);
+
+            const ev = await registry.getDepegEvent(id);
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
+
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, resumeVaultAddr)], id, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "NotTerminalContinuable");
+        });
+
+        it("B-02 check 6: reverts NotTerminalContinuable for SUPERSEDED parent event", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            await registry.connect(controller).supersede(id);
+            expect(await stateOf(id)).to.equal(S.SUPERSEDED);
+
+            const ev = await registry.getDepegEvent(id);
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
+
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, resumeVaultAddr)], id, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "NotTerminalContinuable");
+        });
+
+        it("B-02 check 6: reverts NotTerminalContinuable for NORMAL parent event", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            await report(coinA.address, 0); // G3: WATCH → NORMAL
+            expect(await stateOf(id)).to.equal(S.NORMAL);
+
+            const ev = await registry.getDepegEvent(id);
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
+
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0),
+                    [dest(1, resumeVaultAddr)], id, holdId
+                )
+            ).to.be.revertedWithCustomError(registry, "NotTerminalContinuable");
+        });
+
+        // ── positive paths ────────────────────────────────────────────────────
+
+        it("creates a PROTECTED event with COMPLETE destinations when all checks pass", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            await registry.connect(controller).resumeProtectionTracking(
+                coinA.address, evidence(coinA.address, 0), resumeDests, expiredId, holdId
+            );
+            const id = await activeId(coinA.address);
+            expect(id).to.not.equal(ethers.ZeroHash);
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+            expect(await destStateOf(id, 0)).to.equal(DS.COMPLETE);
+        });
+
+        it("inherits rootIncidentId from the expired parent event", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            const parentRoot = (await registry.getDepegEvent(expiredId)).rootIncidentId;
+            await registry.connect(controller).resumeProtectionTracking(
+                coinA.address, evidence(coinA.address, 0), resumeDests, expiredId, holdId
+            );
+            const continuationId = await activeId(coinA.address);
+            const ev = await registry.getDepegEvent(continuationId);
+            expect(ev.rootIncidentId).to.equal(parentRoot);
+            expect(ev.rootIncidentId).to.not.equal(continuationId); // not self-referential
+        });
+
+        it("emits RecoveryTrackingResumed", async function () {
+            const { expiredId, holdId, resumeDests } = await setupForResume(coinA.address);
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address, evidence(coinA.address, 0), resumeDests, expiredId, holdId
+                )
+            ).to.emit(registry, "RecoveryTrackingResumed")
+             .withArgs(anyValue, coinA.address, 1n);
         });
 
         it("auto-recovery fires from resumed event after stabilityWindow stable reports", async function () {
+            const resumeVaultAddr = ethers.Wallet.createRandom().address;
+            const resumeVaultAddr2 = ethers.Wallet.createRandom().address;
+            const expiredId = await toProtected(coinA.address, 1);
+            await time.increase(EVENT_TTL + 1);
+            await registry.settleExpired(expiredId);
+
+            const ev = await registry.getDepegEvent(expiredId);
+            const assetId = ethers.zeroPadValue(coinA.address, 32);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const receipt = await tx.wait();
+            const parsed = receipt.logs
+                .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "HoldAcquired");
+            const holdId = parsed.args.holdId;
+
             await registry.connect(controller).resumeProtectionTracking(
-                coinA.address,
-                evidence(coinA.address, 0),
-                [dest(1, other.address), dest(2, other.address)]
+                coinA.address, evidence(coinA.address, 0),
+                [dest(1, resumeVaultAddr), dest(2, resumeVaultAddr2)],
+                expiredId, holdId
             );
             const id = await activeId(coinA.address);
             expect(await stateOf(id)).to.equal(S.PROTECTED);

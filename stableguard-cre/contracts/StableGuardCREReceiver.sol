@@ -24,9 +24,20 @@ interface IDepegEventRegistry {
         external returns (bytes32 eventId, State resultState);
     function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
     function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
-    function resumeProtectionTracking(address coin, bytes32 evidenceRoot, DestinationInput[] calldata dests)
-        external returns (bytes32 eventId);
+    function resumeProtectionTracking(
+        address coin,
+        bytes32 evidenceRoot,
+        DestinationInput[] calldata dests,
+        bytes32 expiredEventId,
+        bytes32 holdId
+    ) external returns (bytes32 eventId);
     function finalizeRecovery(bytes32 eventId) external;
+}
+
+interface IProtectionHoldLedger {
+    function acquire(address vault, bytes32 rootIncidentId, bytes32 assetId)
+        external returns (bytes32 holdId);
+    function release(bytes32 holdId) external returns (bool vaultFullyReleased);
 }
 
 /**
@@ -41,7 +52,8 @@ interface IDepegEventRegistry {
  *   1. eventRegistry.processReport   — advance state machine
  *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
  *   3. vault.pause()                 — exposure-gated; outcome captured in bool
- *   4. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
+ *   4. holdLedger.acquire()          — record hold identity after successful pause
+ *   5. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
  *
  * Constructor args:
  *   forwarder         Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88
@@ -50,6 +62,7 @@ interface IDepegEventRegistry {
  *   eventRegistry     DepegEventRegistry (must transferController to this address after deploy)
  *   vault             Target vault to pause on confirmed depeg
  *   localChainSelector CCIP chain selector for the local chain (used as destination ID)
+ *   holdLedger        ProtectionHoldLedger (must transferCoordinator to this address after deploy)
  */
 contract StableGuardCREReceiver {
     address                public immutable forwarder;
@@ -57,11 +70,16 @@ contract StableGuardCREReceiver {
     IDepegEventRegistry    public immutable eventRegistry;
     address                public immutable vault;
     uint64                 public immutable localChainSelector;
+    IProtectionHoldLedger  public immutable holdLedger;
 
     uint8   public lastCompositeScore;
     uint8   public lastMarketStress;
     uint256 public lastObservedAt;
     uint256 public reportCount;
+
+    // Per-coin hold tracking for lineage proof on resumeProtectionTracking
+    mapping(address => bytes32) private _coinHoldId;   // coin => active holdId (0 = none)
+    mapping(address => bytes32) private _lastEventId;  // coin => last non-zero eventId seen
 
     struct CoinSignal {
         address coin;
@@ -104,13 +122,15 @@ contract StableGuardCREReceiver {
         address _exposureRegistry,
         address _eventRegistry,
         address _vault,
-        uint64  _localChainSelector
+        uint64  _localChainSelector,
+        address _holdLedger
     ) {
         forwarder           = _forwarder;
         exposureRegistry    = IExposureRegistry(_exposureRegistry);
         eventRegistry       = IDepegEventRegistry(_eventRegistry);
         vault               = _vault;
         localChainSelector  = _localChainSelector;
+        holdLedger          = IProtectionHoldLedger(_holdLedger);
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
@@ -171,6 +191,9 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
+            // Track the last non-zero eventId per coin for resumeProtectionTracking lineage
+            if (eventId != bytes32(0)) _lastEventId[coin] = eventId;
+
             bytes32 sym = bytes32(uint256(uint160(coin)));
 
             // ── Auto-recovery: vault unpause ──────────────────────────────────────
@@ -178,6 +201,12 @@ contract StableGuardCREReceiver {
             // and on subsequent cycles until the destination slot is settled.
             if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
                 if (IPausable(vault).paused()) {
+                    // Release the protection hold before unpausing
+                    bytes32 hId = _coinHoldId[coin];
+                    if (hId != bytes32(0)) {
+                        try holdLedger.release(hId) { _coinHoldId[coin] = bytes32(0); } catch { }
+                    }
+
                     bool unpaused = false;
                     try IPausable(vault).unpause() {
                         unpaused = true;
@@ -208,7 +237,10 @@ contract StableGuardCREReceiver {
                     chainSelector: localChainSelector,
                     vault:         vault
                 });
-                try eventRegistry.resumeProtectionTracking(coin, bytes32(0), resumeDests) { }
+                try eventRegistry.resumeProtectionTracking(
+                    coin, bytes32(0), resumeDests,
+                    _lastEventId[coin], _coinHoldId[coin]
+                ) { }
                 catch (bytes memory reason) {
                     emit RecoveryResumeFailed(coin, reason);
                 }
@@ -245,7 +277,16 @@ contract StableGuardCREReceiver {
                 emit VaultPauseFailed(vault, sym, reason);
             }
 
-            // Call 4: close the destination slot with the honest result
+            // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events)
+            if (pauseResult) {
+                try holdLedger.acquire(vault, bytes32(eventId), sym)
+                    returns (bytes32 hId)
+                {
+                    _coinHoldId[coin] = hId;
+                } catch { }
+            }
+
+            // Call 5: close the destination slot with the honest result
             IDepegEventRegistry.DestState dcState = pauseResult
                 ? IDepegEventRegistry.DestState.COMPLETE
                 : IDepegEventRegistry.DestState.FAILED;
