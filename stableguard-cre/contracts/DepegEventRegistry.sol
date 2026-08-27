@@ -91,6 +91,14 @@ contract DepegEventRegistry {
         Destination[] destinations;
     }
 
+    // ── Role constants ────────────────────────────────────────────────────────
+
+    bytes32 public constant REPORTER_ROLE          = keccak256("REPORTER_ROLE");
+    bytes32 public constant ACTION_ROLE            = keccak256("ACTION_ROLE");
+    bytes32 public constant KEEPER_ROLE            = keccak256("KEEPER_ROLE");
+    bytes32 public constant GOVERNANCE_ROLE        = keccak256("GOVERNANCE_ROLE");
+    bytes32 public constant PAUSE_COORDINATOR_ROLE = keccak256("PAUSE_COORDINATOR_ROLE");
+
     // ── Immutables ────────────────────────────────────────────────────────────
 
     uint8   public immutable watchThreshold;      // min score to open a WATCH event
@@ -102,9 +110,7 @@ contract DepegEventRegistry {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
-    // Mutable: deployer bootstraps with itself then calls transferController(receiver)
-    // once StableGuardCREReceiver is deployed (chicken-and-egg resolution).
-    address public controller;
+    mapping(bytes32 => mapping(address => bool)) private _roles;
     IProtectionHoldLedger public holdLedger;
     mapping(bytes32 => DepegEvent) private _events;
 
@@ -125,6 +131,8 @@ contract DepegEventRegistry {
     event RecoveryTrackingResumed(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event DestinationUpdated(bytes32 indexed eventId, uint256 indexed destIndex, DestState newState);
     event ControllerTransferred(address indexed oldController, address indexed newController);
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -152,7 +160,7 @@ contract DepegEventRegistry {
     // ── Constructor ───────────────────────────────────────────────────────────
 
     constructor(
-        address _controller,
+        address _governance,
         uint8   _watchThreshold,
         uint8   _confirmedThreshold,
         uint8   _stabilityWindow,
@@ -160,7 +168,15 @@ contract DepegEventRegistry {
         uint256 _pendingTTL,
         uint256 _recoveryCooldown
     ) {
-        controller         = _controller;
+        if (_governance == address(0)) revert ZeroAddress();
+        // Grant all roles to the initial governance address.
+        // Deployer bootstraps with full access then delegates via grantRole/transferController.
+        _roles[GOVERNANCE_ROLE][_governance]        = true;
+        _roles[REPORTER_ROLE][_governance]          = true;
+        _roles[ACTION_ROLE][_governance]            = true;
+        _roles[KEEPER_ROLE][_governance]            = true;
+        _roles[PAUSE_COORDINATOR_ROLE][_governance] = true;
+
         watchThreshold     = _watchThreshold;
         confirmedThreshold = _confirmedThreshold;
         stabilityWindow    = _stabilityWindow;
@@ -169,22 +185,43 @@ contract DepegEventRegistry {
         recoveryCooldown   = _recoveryCooldown;
     }
 
+    // ── Role management ───────────────────────────────────────────────────────
+
+    function hasRole(bytes32 role, address account) public view returns (bool) {
+        return _roles[role][account];
+    }
+
+    function grantRole(bytes32 role, address account) external {
+        _requireRole(GOVERNANCE_ROLE);
+        if (account == address(0)) revert ZeroAddress();
+        _roles[role][account] = true;
+        emit RoleGranted(role, account, msg.sender);
+    }
+
+    function revokeRole(bytes32 role, address account) external {
+        _requireRole(GOVERNANCE_ROLE);
+        _roles[role][account] = false;
+        emit RoleRevoked(role, account, msg.sender);
+    }
+
     // ── transferController ────────────────────────────────────────────────────
 
-    /// @notice Transfer the controller role. Used post-deployment to hand control
-    ///         to StableGuardCREReceiver once its address is known.
-    function transferController(address newController) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (newController == address(0)) revert ZeroAddress();
-        address old = controller;
-        controller = newController;
-        emit ControllerTransferred(old, newController);
+    /// @notice Convenience: grants REPORTER + ACTION + PAUSE_COORDINATOR to newReceiver.
+    ///         Used post-deployment to hand operational roles to StableGuardCREReceiver.
+    ///         Does not revoke roles from any previous holder; use revokeRole for that.
+    function transferController(address newReceiver) external {
+        _requireRole(GOVERNANCE_ROLE);
+        if (newReceiver == address(0)) revert ZeroAddress();
+        _roles[REPORTER_ROLE][newReceiver]          = true;
+        _roles[ACTION_ROLE][newReceiver]            = true;
+        _roles[PAUSE_COORDINATOR_ROLE][newReceiver] = true;
+        emit ControllerTransferred(address(0), newReceiver);
     }
 
     // ── setHoldLedger ─────────────────────────────────────────────────────────
 
     function setHoldLedger(address newHoldLedger) external {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(GOVERNANCE_ROLE);
         if (newHoldLedger == address(0)) revert ZeroAddress();
         holdLedger = IProtectionHoldLedger(newHoldLedger);
     }
@@ -200,7 +237,7 @@ contract DepegEventRegistry {
         uint8   score,
         bytes32 evidenceRoot
     ) external returns (bytes32 eventId, State resultState) {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(REPORTER_ROLE);
 
         bytes32 coinKey  = keccak256(abi.encode(coin));
         bytes32 activeId = activeEventId[coinKey];
@@ -221,14 +258,14 @@ contract DepegEventRegistry {
     // ── initiateProtection ────────────────────────────────────────────────────
 
     /// @notice G5: CONFIRMED_DEPEG → PROTECTION_PENDING.
-    ///         Called by the controller after dispatching CCIP protection messages.
+    ///         Called by the ACTION_ROLE after dispatching CCIP protection messages.
     ///         Resets the destinations array to the provided list, all PENDING.
     function initiateProtection(
         bytes32                     eventId,
         DestinationInput[] calldata dests
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (dests.length == 0)        revert NoDestinations();
+        _requireRole(ACTION_ROLE);
+        if (dests.length == 0) revert NoDestinations();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -272,7 +309,7 @@ contract DepegEventRegistry {
         uint256   destIndex,
         DestState newDestState
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(ACTION_ROLE);
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -321,12 +358,15 @@ contract DepegEventRegistry {
     // ── initiateRecovery ──────────────────────────────────────────────────────
 
     /// @notice G9: PROTECTED → RECOVERY_PENDING.
+    ///         Callable by ACTION_ROLE (normal receiver path) or GOVERNANCE_ROLE
+    ///         (emergency override when automated recovery is stalled).
     function initiateRecovery(
         bytes32                     eventId,
         DestinationInput[] calldata dests
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (dests.length == 0)        revert NoDestinations();
+        if (!_roles[ACTION_ROLE][msg.sender] && !_roles[GOVERNANCE_ROLE][msg.sender])
+            revert Unauthorized();
+        if (dests.length == 0) revert NoDestinations();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -371,7 +411,7 @@ contract DepegEventRegistry {
         bytes32                     expiredEventId,
         bytes32                     holdId
     ) external returns (bytes32 eventId) {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(PAUSE_COORDINATOR_ROLE);
         if (dests.length == 0)        revert NoDestinations();
         if (address(holdLedger) == address(0)) revert HoldLedgerNotSet();
 
@@ -445,11 +485,13 @@ contract DepegEventRegistry {
     /// @notice DG4/DG5: re-mark specific FAILED destinations as PENDING for retry.
     ///         Only valid from PARTIALLY_PROTECTED or PARTIALLY_RECOVERED.
     ///         COMPLETE and SUPERSEDED slots are untouchable (DG5 reverts on them).
+    ///         Callable by KEEPER_ROLE (automated bots) or GOVERNANCE_ROLE (override).
     function retryFailedDestinations(
         bytes32            eventId,
         uint256[] calldata destIndices
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
+        if (!_roles[KEEPER_ROLE][msg.sender] && !_roles[GOVERNANCE_ROLE][msg.sender])
+            revert Unauthorized();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -497,7 +539,7 @@ contract DepegEventRegistry {
     /// @notice G14: terminate WATCH or CONFIRMED_DEPEG as SUPERSEDED.
     ///         Hard-reverts (G15) if state is PROTECTION_PENDING or beyond.
     function supersede(bytes32 eventId) external {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(GOVERNANCE_ROLE);
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -549,6 +591,12 @@ contract DepegEventRegistry {
 
     function getActiveEventId(address coin) external view returns (bytes32) {
         return activeEventId[keccak256(abi.encode(coin))];
+    }
+
+    // ── Internal: role guard ──────────────────────────────────────────────────
+
+    function _requireRole(bytes32 role) internal view {
+        if (!_roles[role][msg.sender]) revert Unauthorized();
     }
 
     // ── Internal: score-driven transitions ────────────────────────────────────
