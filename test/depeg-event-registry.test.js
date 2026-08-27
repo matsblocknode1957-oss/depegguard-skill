@@ -146,6 +146,88 @@ describe("DepegEventRegistry", function () {
         });
     });
 
+    // ── rootIncidentId lineage ────────────────────────────────────────────────
+
+    describe("rootIncidentId – incident lineage", function () {
+        it("rootIncidentId equals eventId on a freshly created WATCH event", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            const ev = await registry.getDepegEvent(id);
+            expect(ev.rootIncidentId).to.equal(id);
+        });
+
+        it("rootIncidentId is unchanged after an extension (EventExtended)", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            const evBefore = await registry.getDepegEvent(id);
+            await report(coinA.address, WATCH_THRESHOLD);
+            const evAfter = await registry.getDepegEvent(id);
+            expect(evAfter.rootIncidentId).to.equal(evBefore.rootIncidentId);
+        });
+
+        it("rootIncidentId is unchanged through WATCH → CONFIRMED_DEPEG transition", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            const root = (await registry.getDepegEvent(id)).rootIncidentId;
+            await report(coinA.address, CONFIRMED_THRESHOLD);
+            expect((await registry.getDepegEvent(id)).rootIncidentId).to.equal(root);
+        });
+
+        it("rootIncidentId is unchanged through CONFIRMED_DEPEG → PROTECTION_PENDING → PROTECTED", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const id = await activeId(coinA.address);
+            const root = (await registry.getDepegEvent(id)).rootIncidentId;
+
+            await report(coinA.address, CONFIRMED_THRESHOLD);
+            const dests = [dest(1, ethers.Wallet.createRandom().address)];
+            await registry.connect(controller).initiateProtection(id, dests);
+            await registry.connect(controller).destinationCallback(id, 0, DS.COMPLETE);
+
+            expect((await registry.getDepegEvent(id)).rootIncidentId).to.equal(root);
+        });
+
+        it("two distinct coins have independent rootIncidentIds", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            await report(coinB.address, WATCH_THRESHOLD);
+            const idA = await activeId(coinA.address);
+            const idB = await activeId(coinB.address);
+            const evA = await registry.getDepegEvent(idA);
+            const evB = await registry.getDepegEvent(idB);
+            expect(evA.rootIncidentId).to.equal(idA);
+            expect(evB.rootIncidentId).to.equal(idB);
+            expect(evA.rootIncidentId).to.not.equal(evB.rootIncidentId);
+        });
+
+        it("a new event created after the prior terminates gets its own rootIncidentId", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const firstId = await activeId(coinA.address);
+            // terminate via score-based recovery
+            await report(coinA.address, 0);
+            expect(await activeId(coinA.address)).to.equal(ethers.ZeroHash);
+
+            await report(coinA.address, WATCH_THRESHOLD);
+            const secondId = await activeId(coinA.address);
+            expect(secondId).to.not.equal(firstId);
+            const evSecond = await registry.getDepegEvent(secondId);
+            expect(evSecond.rootIncidentId).to.equal(secondId);
+            expect(evSecond.rootIncidentId).to.not.equal(firstId);
+        });
+
+        it("resumeProtectionTracking produces an event with rootIncidentId == its own eventId (Step 1 behaviour)", async function () {
+            const dests = [dest(1, ethers.Wallet.createRandom().address)];
+            const tx = await registry.connect(controller).resumeProtectionTracking(
+                coinA.address, evidence(coinA.address, 0), dests
+            );
+            const receipt = await tx.wait();
+            const evt = receipt.logs
+                .map(l => { try { return registry.interface.parseLog(l); } catch { return null; } })
+                .find(e => e && e.name === "RecoveryTrackingResumed");
+            const resumedId = evt.args.eventId;
+            const ev = await registry.getDepegEvent(resumedId);
+            expect(ev.rootIncidentId).to.equal(resumedId);
+        });
+    });
+
     // ── G1: extend ────────────────────────────────────────────────────────────
 
     describe("G1 – lookup-before-create (extend)", function () {

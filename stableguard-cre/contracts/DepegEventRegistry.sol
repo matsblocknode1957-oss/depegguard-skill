@@ -68,6 +68,7 @@ contract DepegEventRegistry {
 
     struct DepegEvent {
         address       coin;
+        bytes32       rootIncidentId; // set once at _create(); links resumptions back to the originating incident
         State         state;
         uint8         compositeScore;
         uint8         stableCount;    // consecutive stable reports while PROTECTED; hard-reset on any non-stable
@@ -353,6 +354,7 @@ contract DepegEventRegistry {
         eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
         DepegEvent storage ev = _events[eventId];
         ev.coin                  = coin;
+        ev.rootIncidentId        = eventId; // Step 3 will inherit from expired parent's rootIncidentId
         ev.state                 = State.PROTECTED;
         ev.compositeScore        = 0;
         ev.evidenceRoot          = evidenceRoot;
@@ -613,6 +615,7 @@ contract DepegEventRegistry {
         eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
         DepegEvent storage ev = _events[eventId];
         ev.coin           = coin;
+        ev.rootIncidentId = eventId;
         ev.state          = State.WATCH;
         ev.compositeScore = score;
         ev.evidenceRoot   = evidenceRoot;
