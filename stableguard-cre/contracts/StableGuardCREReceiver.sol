@@ -38,6 +38,7 @@ interface IProtectionHoldLedger {
     function acquire(address vault, bytes32 rootIncidentId, bytes32 assetId)
         external returns (bytes32 holdId);
     function release(bytes32 holdId) external returns (bool vaultFullyReleased);
+    function activeHoldCount(address vault) external view returns (uint256);
 }
 
 /**
@@ -201,19 +202,25 @@ contract StableGuardCREReceiver {
             // and on subsequent cycles until the destination slot is settled.
             if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
                 if (IPausable(vault).paused()) {
-                    // Release the protection hold before unpausing
                     bytes32 hId = _coinHoldId[coin];
+                    bool holdReleased = false;
+                    bool vaultFullyReleased = false;
                     if (hId != bytes32(0)) {
-                        try holdLedger.release(hId) { _coinHoldId[coin] = bytes32(0); } catch { }
+                        try holdLedger.release(hId) returns (bool _vfr) {
+                            _coinHoldId[coin] = bytes32(0);
+                            holdReleased = true;
+                            vaultFullyReleased = _vfr;
+                        } catch { }
                     }
 
-                    bool unpaused = false;
-                    try IPausable(vault).unpause() {
-                        unpaused = true;
-                    } catch (bytes memory reason) {
-                        emit VaultUnpauseFailed(vault, sym, reason);
+                    if (vaultFullyReleased) {
+                        try IPausable(vault).unpause() { }
+                        catch (bytes memory reason) {
+                            emit VaultUnpauseFailed(vault, sym, reason);
+                        }
                     }
-                    IDepegEventRegistry.DestState cbState = unpaused
+
+                    IDepegEventRegistry.DestState cbState = holdReleased
                         ? IDepegEventRegistry.DestState.COMPLETE
                         : IDepegEventRegistry.DestState.FAILED;
                     try eventRegistry.destinationCallback(eventId, 0, cbState) { }
@@ -269,12 +276,16 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
-            // Call 3: pause vault; capture outcome so Call 4 reports honestly
+            // Call 3: pause vault; skip re-pause if vault already protected by another hold
             bool pauseResult = false;
-            try IPausable(vault).pause() {
+            if (holdLedger.activeHoldCount(vault) > 0 && IPausable(vault).paused()) {
                 pauseResult = true;
-            } catch (bytes memory reason) {
-                emit VaultPauseFailed(vault, sym, reason);
+            } else {
+                try IPausable(vault).pause() {
+                    pauseResult = true;
+                } catch (bytes memory reason) {
+                    emit VaultPauseFailed(vault, sym, reason);
+                }
             }
 
             // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events)

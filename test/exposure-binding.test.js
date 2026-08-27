@@ -266,6 +266,31 @@ describe("ExposureRegistry binding", function () {
         expect(await activeEventId(coinA.address)).to.equal(ethers.ZeroHash);
     });
 
+    // B-01: two assets depegging simultaneously on the same vault must produce exactly
+    // one vault.pause() call. The second coin sees activeHoldCount > 0 + paused == true
+    // and skips the physical pause, but still acquires its own hold.
+    it("B-01: two coins reaching PROTECTED on same vault — only one pause() call", async function () {
+        const vaultAddr = await vault.getAddress();
+        await registry.connect(admin).registerExposure(vaultAddr, addrToBytes32(coinA.address));
+        await registry.connect(admin).registerExposure(vaultAddr, addrToBytes32(coinB.address));
+
+        const report = encodeReport([coinA.address, coinB.address], [2, 2], 2);
+        await receiver.connect(forwarder).onReport("0x", report);
+
+        // Exactly one physical pause despite two coins
+        expect(await vault.pauseCallCount()).to.equal(1n);
+        expect(await vault.paused()).to.equal(true);
+
+        // Both holds acquired → count = 2
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(2n);
+
+        // Both events at PROTECTED
+        const idA = await eventRegistry.getActiveEventId(coinA.address);
+        const idB = await eventRegistry.getActiveEventId(coinB.address);
+        expect(await eventState(idA)).to.equal(S.PROTECTED);
+        expect(await eventState(idB)).to.equal(S.PROTECTED);
+    });
+
     it("skips unregistered coin but still pauses for registered coin in same report", async function () {
         const vaultAddr = await vault.getAddress();
         // Vault holds coinB only — coinA is unregistered
