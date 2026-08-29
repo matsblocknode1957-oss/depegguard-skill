@@ -2,13 +2,18 @@
 pragma solidity 0.8.24;
 
 interface IExposureRegistry {
+    enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
     function isExposed(address vault, bytes32 symbol) external view returns (bool);
+    function vaultFreezeMode(address vault) external view returns (FreezeMode);
 }
 
 interface IPausable {
     function pause() external;
     function unpause() external;
     function paused() external view returns (bool);
+    function pauseDeposits() external;
+    function unpauseDeposits() external;
+    function depositsFrozen() external view returns (bool);
 }
 
 interface IDepegEventRegistry {
@@ -201,7 +206,7 @@ contract StableGuardCREReceiver {
             // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
             // and on subsequent cycles until the destination slot is settled.
             if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
-                if (IPausable(vault).paused()) {
+                if (IPausable(vault).paused() || IPausable(vault).depositsFrozen()) {
                     bytes32 hId = _coinHoldId[coin];
                     bool holdReleased = false;
                     bool vaultFullyReleased = false;
@@ -214,9 +219,21 @@ contract StableGuardCREReceiver {
                     }
 
                     if (vaultFullyReleased) {
-                        try IPausable(vault).unpause() { }
-                        catch (bytes memory reason) {
-                            emit VaultUnpauseFailed(vault, sym, reason);
+                        // Unfreeze based on actual vault state, not the current freeze mode.
+                        // This handles mid-incident mode changes correctly: if the vault was
+                        // paused under FULL_FREEZE and the mode was later changed, vault.paused()
+                        // is still true, so unpause() fires and the vault is fully unfrozen.
+                        if (IPausable(vault).paused()) {
+                            try IPausable(vault).unpause() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                        }
+                        if (IPausable(vault).depositsFrozen()) {
+                            try IPausable(vault).unpauseDeposits() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
                         }
                     }
 
@@ -237,7 +254,7 @@ contract StableGuardCREReceiver {
             // Fires when the prior PROTECTED event expired before stableCount
             // reached stabilityWindow. The vault is still paused and needs
             // a fresh PROTECTED event to re-arm auto-recovery.
-            if (eventId == bytes32(0) && IPausable(vault).paused()) {
+            if (eventId == bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
                 IDepegEventRegistry.DestinationInput[] memory resumeDests =
                     new IDepegEventRegistry.DestinationInput[](1);
                 resumeDests[0] = IDepegEventRegistry.DestinationInput({
@@ -276,12 +293,26 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
-            // Call 3: pause vault; skip re-pause if vault already protected by another hold
+            // Call 3: freeze vault (full or deposit-only) per the customer's registered mode.
+            // Skip the freeze call if another hold already has the vault in the appropriate
+            // frozen state — check the mode-specific flag so FULL_FREEZE checks paused()
+            // and DEPOSIT_ONLY_FREEZE checks depositsFrozen().
+            IExposureRegistry.FreezeMode freezeMode = exposureRegistry.vaultFreezeMode(vault);
+            bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
+                ? IPausable(vault).paused()
+                : IPausable(vault).depositsFrozen();
+
             bool pauseResult = false;
-            if (holdLedger.activeHoldCount(vault) > 0 && IPausable(vault).paused()) {
+            if (holdLedger.activeHoldCount(vault) > 0 && alreadyFrozen) {
                 pauseResult = true;
-            } else {
+            } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
                 try IPausable(vault).pause() {
+                    pauseResult = true;
+                } catch (bytes memory reason) {
+                    emit VaultPauseFailed(vault, sym, reason);
+                }
+            } else {
+                try IPausable(vault).pauseDeposits() {
                     pauseResult = true;
                 } catch (bytes memory reason) {
                     emit VaultPauseFailed(vault, sym, reason);
