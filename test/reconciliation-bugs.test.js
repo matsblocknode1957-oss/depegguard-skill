@@ -2,6 +2,7 @@
 
 const { ethers } = require("hardhat");
 const { expect } = require("chai");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 const LOCAL_CHAIN_SELECTOR = 1n;
 
@@ -11,6 +12,7 @@ const STABILITY_WINDOW    = 3;
 const EVENT_TTL           = 86400n;
 const PENDING_TTL         = 3600n;
 const RECOVERY_COOLDOWN   = 900n;
+const MAX_REPORT_AGE      = 604800n; // 1 week — survives any time.increase in these tests
 
 const S = {
     WATCH: 0, CONFIRMED_DEPEG: 1,
@@ -19,7 +21,9 @@ const S = {
     NORMAL: 7, EXPIRED: 8, FAILED: 9, SUPERSEDED: 10,
 };
 
+let _ts = 0n;
 function encodeReport(coins, signalLevels, compositeScore) {
+    const observedAt = ++_ts;
     const coder = ethers.AbiCoder.defaultAbiCoder();
     return coder.encode(
         ["address[]", "uint256[]", "uint256[]", "uint8[]", "bytes[]", "uint8", "uint8", "uint256"],
@@ -31,7 +35,7 @@ function encodeReport(coins, signalLevels, compositeScore) {
             coins.map(() => "0x"),
             compositeScore,
             1,
-            BigInt(Math.floor(Date.now() / 1000)),
+            observedAt,
         ]
     );
 }
@@ -69,6 +73,7 @@ describe("Bug-1: acquire() revert produces FAILED destinationCallback", function
 
     beforeEach(async function () {
         [forwarder, admin, coinA] = await ethers.getSigners();
+        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 1000n;
 
         const MockVaultFactory = await ethers.getContractFactory("MockVault");
         vault = await MockVaultFactory.deploy();
@@ -92,7 +97,8 @@ describe("Bug-1: acquire() revert produces FAILED destinationCallback", function
             await eventRegistry.getAddress(),
             await vault.getAddress(),
             LOCAL_CHAIN_SELECTOR,
-            await mockLedger.getAddress()
+            await mockLedger.getAddress(),
+            MAX_REPORT_AGE
         );
 
         await eventRegistry.connect(admin).transferController(await receiver.getAddress());
@@ -134,6 +140,7 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
 
     beforeEach(async function () {
         [forwarder, admin, coinA] = await ethers.getSigners();
+        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 1000n;
 
         const FlakyVaultFactory = await ethers.getContractFactory("MockFlakyVault");
         flakyVault = await FlakyVaultFactory.deploy();
@@ -153,7 +160,8 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
             await eventRegistry.getAddress(),
             await flakyVault.getAddress(),
             LOCAL_CHAIN_SELECTOR,
-            await holdLedger.getAddress()
+            await holdLedger.getAddress(),
+            MAX_REPORT_AGE
         );
 
         await eventRegistry.connect(admin).setHoldLedger(await holdLedger.getAddress());
@@ -166,8 +174,7 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
 
     it("hold released but event FAILED when vault.unpause() reverts during auto-recovery", async function () {
         // Alert → CONFIRMED_DEPEG → vault paused → PROTECTED
-        const alert = encodeReport([coinA.address], [2], 2);
-        await receiver.connect(forwarder).onReport("0x", alert);
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
         expect(await flakyVault.paused()).to.equal(true);
 
         const firstId = await eventRegistry.getActiveEventId(coinA.address);
@@ -178,9 +185,8 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
 
         // STABILITY_WINDOW stable reports: report 1 → stableCount=1, report 2 → stableCount=2,
         // report 3 → stableCount+1==STABILITY_WINDOW → _applyAutoRecovery fires within processReport
-        const stable = stableReport([coinA.address]);
         for (let i = 0; i < STABILITY_WINDOW; i++) {
-            await receiver.connect(forwarder).onReport("0x", stable);
+            await receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]));
         }
 
         // unpause threw → vault still paused
@@ -211,6 +217,7 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
 
     beforeEach(async function () {
         [forwarder, admin, coinA] = await ethers.getSigners();
+        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 1000n;
 
         const FlakyVaultFactory = await ethers.getContractFactory("MockFlakyVault");
         flakyVault = await FlakyVaultFactory.deploy();
@@ -230,7 +237,8 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
             await eventRegistry.getAddress(),
             await flakyVault.getAddress(),
             LOCAL_CHAIN_SELECTOR,
-            await holdLedger.getAddress()
+            await holdLedger.getAddress(),
+            MAX_REPORT_AGE
         );
 
         await eventRegistry.connect(admin).setHoldLedger(await holdLedger.getAddress());
@@ -243,8 +251,7 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
 
     it("vault unpauses on retry without reverting on HoldAlreadyReleased", async function () {
         // Alert → CONFIRMED_DEPEG → vault paused → PROTECTED (1 dest, COMPLETE)
-        const alert = encodeReport([coinA.address], [2], 2);
-        await receiver.connect(forwarder).onReport("0x", alert);
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
         expect(await flakyVault.paused()).to.equal(true);
 
         const firstId = await eventRegistry.getActiveEventId(coinA.address);
@@ -258,8 +265,7 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
 
         // Attempt 1: hold released, unpause reverts → cbState = FAILED
         await flakyVault.setUnpauseReverts(true);
-        const stable = stableReport([coinA.address]);
-        await receiver.connect(forwarder).onReport("0x", stable);
+        await receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]));
 
         // vault still paused; event still RECOVERY_PENDING (dest-1 = PENDING → not all settled)
         expect(await flakyVault.paused()).to.equal(true);
@@ -269,7 +275,9 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
         // Attempt 2: _coinHoldId[coin] == 0, activeHoldCount == 0 → retry path
         // must NOT throw HoldAlreadyReleased; vault.unpause() now succeeds.
         await flakyVault.setUnpauseReverts(false);
-        await expect(receiver.connect(forwarder).onReport("0x", stable)).to.not.be.reverted;
+        await expect(
+            receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]))
+        ).to.not.be.reverted;
         expect(await flakyVault.paused()).to.equal(false);
     });
 });
