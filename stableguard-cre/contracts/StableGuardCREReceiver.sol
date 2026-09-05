@@ -211,16 +211,22 @@ contract StableGuardCREReceiver {
                             holdReleased = true;
                             vaultFullyReleased = _vfr;
                         } catch { }
+                    } else if (holdLedger.activeHoldCount(vault) == 0) {
+                        // Retry path: hold released in a prior cycle but unpause failed.
+                        // No holds remain — treat as fully released and attempt unpause.
+                        holdReleased = true;
+                        vaultFullyReleased = true;
                     }
 
+                    bool unpaused = !vaultFullyReleased; // true when no unpause needed
                     if (vaultFullyReleased) {
-                        try IPausable(vault).unpause() { }
+                        try IPausable(vault).unpause() { unpaused = true; }
                         catch (bytes memory reason) {
                             emit VaultUnpauseFailed(vault, sym, reason);
                         }
                     }
 
-                    IDepegEventRegistry.DestState cbState = holdReleased
+                    IDepegEventRegistry.DestState cbState = (holdReleased && unpaused)
                         ? IDepegEventRegistry.DestState.COMPLETE
                         : IDepegEventRegistry.DestState.FAILED;
                     try eventRegistry.destinationCallback(eventId, 0, cbState) { }
@@ -289,16 +295,18 @@ contract StableGuardCREReceiver {
             }
 
             // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events)
+            bool holdAcquired = false;
             if (pauseResult) {
                 try holdLedger.acquire(vault, bytes32(eventId), sym)
                     returns (bytes32 hId)
                 {
                     _coinHoldId[coin] = hId;
+                    holdAcquired = true;
                 } catch { }
             }
 
             // Call 5: close the destination slot with the honest result
-            IDepegEventRegistry.DestState dcState = pauseResult
+            IDepegEventRegistry.DestState dcState = (pauseResult && holdAcquired)
                 ? IDepegEventRegistry.DestState.COMPLETE
                 : IDepegEventRegistry.DestState.FAILED;
             try eventRegistry.destinationCallback(eventId, 0, dcState) {
