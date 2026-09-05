@@ -28,6 +28,17 @@ pragma solidity 0.8.24;
 ///   Any non-terminal state → EXPIRED  when  block.timestamp ≥ createdAt + eventTTL  (highest priority)
 ///   PROTECTION_PENDING / RECOVERY_PENDING → FAILED  when  pendingTTL elapsed
 ///   WATCH / CONFIRMED_DEPEG → SUPERSEDED  via  supersede()  (blocked at PROTECTION_PENDING and beyond)
+interface IProtectionHoldLedger {
+    struct ProtectionHold {
+        bytes32 holdId;
+        bytes32 rootIncidentId;
+        bytes32 assetId;
+        address vault;
+        bool    active;
+    }
+    function getHold(bytes32 holdId) external view returns (ProtectionHold memory);
+}
+
 contract DepegEventRegistry {
 
     // ── Enums ─────────────────────────────────────────────────────────────────
@@ -68,6 +79,7 @@ contract DepegEventRegistry {
 
     struct DepegEvent {
         address       coin;
+        bytes32       rootIncidentId; // set once at _create(); links resumptions back to the originating incident
         State         state;
         uint8         compositeScore;
         uint8         stableCount;    // consecutive stable reports while PROTECTED; hard-reset on any non-stable
@@ -78,6 +90,14 @@ contract DepegEventRegistry {
         uint256       recoveryInitiatedAt;   // 0 until RECOVERY_PENDING
         Destination[] destinations;
     }
+
+    // ── Role constants ────────────────────────────────────────────────────────
+
+    bytes32 public constant REPORTER_ROLE          = keccak256("REPORTER_ROLE");
+    bytes32 public constant ACTION_ROLE            = keccak256("ACTION_ROLE");
+    bytes32 public constant KEEPER_ROLE            = keccak256("KEEPER_ROLE");
+    bytes32 public constant GOVERNANCE_ROLE        = keccak256("GOVERNANCE_ROLE");
+    bytes32 public constant PAUSE_COORDINATOR_ROLE = keccak256("PAUSE_COORDINATOR_ROLE");
 
     // ── Immutables ────────────────────────────────────────────────────────────
 
@@ -90,9 +110,8 @@ contract DepegEventRegistry {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
-    // Mutable: deployer bootstraps with itself then calls transferController(receiver)
-    // once StableGuardCREReceiver is deployed (chicken-and-egg resolution).
-    address public controller;
+    mapping(bytes32 => mapping(address => bool)) private _roles;
+    IProtectionHoldLedger public holdLedger;
     mapping(bytes32 => DepegEvent) private _events;
 
     /// Lookup table: coinKey → currently active (non-terminal) eventId.
@@ -112,6 +131,8 @@ contract DepegEventRegistry {
     event RecoveryTrackingResumed(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event DestinationUpdated(bytes32 indexed eventId, uint256 indexed destIndex, DestState newState);
     event ControllerTransferred(address indexed oldController, address indexed newController);
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -128,11 +149,18 @@ contract DepegEventRegistry {
     error NotYetExpired();
     error PendingNotTimedOut();
     error RecoveryConditionsNotMet();
+    error HoldLedgerNotSet();
+    error HoldInactive(bytes32 holdId);
+    error HoldVaultMismatch(bytes32 holdId, address holdVault, address resumeVault);
+    error HoldAssetMismatch(bytes32 holdId, bytes32 holdAsset, bytes32 coinAsset);
+    error HoldIncidentMismatch(bytes32 holdId, bytes32 holdRoot, bytes32 eventRoot);
+    error EventAssetMismatch(bytes32 eventId, address expected, address got);
+    error NotTerminalContinuable(bytes32 eventId, State state);
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
     constructor(
-        address _controller,
+        address _governance,
         uint8   _watchThreshold,
         uint8   _confirmedThreshold,
         uint8   _stabilityWindow,
@@ -140,7 +168,15 @@ contract DepegEventRegistry {
         uint256 _pendingTTL,
         uint256 _recoveryCooldown
     ) {
-        controller         = _controller;
+        if (_governance == address(0)) revert ZeroAddress();
+        // Grant all roles to the initial governance address.
+        // Deployer bootstraps with full access then delegates via grantRole/transferController.
+        _roles[GOVERNANCE_ROLE][_governance]        = true;
+        _roles[REPORTER_ROLE][_governance]          = true;
+        _roles[ACTION_ROLE][_governance]            = true;
+        _roles[KEEPER_ROLE][_governance]            = true;
+        _roles[PAUSE_COORDINATOR_ROLE][_governance] = true;
+
         watchThreshold     = _watchThreshold;
         confirmedThreshold = _confirmedThreshold;
         stabilityWindow    = _stabilityWindow;
@@ -149,16 +185,45 @@ contract DepegEventRegistry {
         recoveryCooldown   = _recoveryCooldown;
     }
 
+    // ── Role management ───────────────────────────────────────────────────────
+
+    function hasRole(bytes32 role, address account) public view returns (bool) {
+        return _roles[role][account];
+    }
+
+    function grantRole(bytes32 role, address account) external {
+        _requireRole(GOVERNANCE_ROLE);
+        if (account == address(0)) revert ZeroAddress();
+        _roles[role][account] = true;
+        emit RoleGranted(role, account, msg.sender);
+    }
+
+    function revokeRole(bytes32 role, address account) external {
+        _requireRole(GOVERNANCE_ROLE);
+        _roles[role][account] = false;
+        emit RoleRevoked(role, account, msg.sender);
+    }
+
     // ── transferController ────────────────────────────────────────────────────
 
-    /// @notice Transfer the controller role. Used post-deployment to hand control
-    ///         to StableGuardCREReceiver once its address is known.
-    function transferController(address newController) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (newController == address(0)) revert ZeroAddress();
-        address old = controller;
-        controller = newController;
-        emit ControllerTransferred(old, newController);
+    /// @notice Convenience: grants REPORTER + ACTION + PAUSE_COORDINATOR to newReceiver.
+    ///         Used post-deployment to hand operational roles to StableGuardCREReceiver.
+    ///         Does not revoke roles from any previous holder; use revokeRole for that.
+    function transferController(address newReceiver) external {
+        _requireRole(GOVERNANCE_ROLE);
+        if (newReceiver == address(0)) revert ZeroAddress();
+        _roles[REPORTER_ROLE][newReceiver]          = true;
+        _roles[ACTION_ROLE][newReceiver]            = true;
+        _roles[PAUSE_COORDINATOR_ROLE][newReceiver] = true;
+        emit ControllerTransferred(address(0), newReceiver);
+    }
+
+    // ── setHoldLedger ─────────────────────────────────────────────────────────
+
+    function setHoldLedger(address newHoldLedger) external {
+        _requireRole(GOVERNANCE_ROLE);
+        if (newHoldLedger == address(0)) revert ZeroAddress();
+        holdLedger = IProtectionHoldLedger(newHoldLedger);
     }
 
     // ── processReport ─────────────────────────────────────────────────────────
@@ -172,7 +237,7 @@ contract DepegEventRegistry {
         uint8   score,
         bytes32 evidenceRoot
     ) external returns (bytes32 eventId, State resultState) {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(REPORTER_ROLE);
 
         bytes32 coinKey  = keccak256(abi.encode(coin));
         bytes32 activeId = activeEventId[coinKey];
@@ -193,14 +258,14 @@ contract DepegEventRegistry {
     // ── initiateProtection ────────────────────────────────────────────────────
 
     /// @notice G5: CONFIRMED_DEPEG → PROTECTION_PENDING.
-    ///         Called by the controller after dispatching CCIP protection messages.
+    ///         Called by the ACTION_ROLE after dispatching CCIP protection messages.
     ///         Resets the destinations array to the provided list, all PENDING.
     function initiateProtection(
         bytes32                     eventId,
         DestinationInput[] calldata dests
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (dests.length == 0)        revert NoDestinations();
+        _requireRole(ACTION_ROLE);
+        if (dests.length == 0) revert NoDestinations();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -244,7 +309,7 @@ contract DepegEventRegistry {
         uint256   destIndex,
         DestState newDestState
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(ACTION_ROLE);
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -293,12 +358,15 @@ contract DepegEventRegistry {
     // ── initiateRecovery ──────────────────────────────────────────────────────
 
     /// @notice G9: PROTECTED → RECOVERY_PENDING.
+    ///         Callable by ACTION_ROLE (normal receiver path) or GOVERNANCE_ROLE
+    ///         (emergency override when automated recovery is stalled).
     function initiateRecovery(
         bytes32                     eventId,
         DestinationInput[] calldata dests
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
-        if (dests.length == 0)        revert NoDestinations();
+        if (!_roles[ACTION_ROLE][msg.sender] && !_roles[GOVERNANCE_ROLE][msg.sender])
+            revert Unauthorized();
+        if (dests.length == 0) revert NoDestinations();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -329,30 +397,69 @@ contract DepegEventRegistry {
 
     // ── resumeProtectionTracking ──────────────────────────────────────────────
 
-    /// @notice Creates a new PROTECTED-state event for a coin that has no active
-    ///         event, when the prior event expired before auto-recovery could fire.
-    ///         Destinations are set to COMPLETE — protection is already in place.
-    ///         processReport will then accumulate stable reports and trigger
-    ///         _applyAutoRecovery after stabilityWindow consecutive stable reports.
-    ///         Called by the controller (CRE receiver) automatically when it
-    ///         detects: stable score, no active event, vault still paused.
+    /// @notice Creates a new PROTECTED-state event for a coin whose prior PROTECTED
+    ///         event expired before auto-recovery could fire, while the vault remains
+    ///         physically paused. Requires explicit lineage proof via six checks:
+    ///         (1) hold active, (2) hold vault matches destination, (3) hold asset
+    ///         matches coin, (4) hold and expired event share rootIncidentId,
+    ///         (5) expired event coin matches coin param, (6) expired event is EXPIRED
+    ///         (not FAILED, SUPERSEDED, or NORMAL).
     function resumeProtectionTracking(
         address                     coin,
         bytes32                     evidenceRoot,
-        DestinationInput[] calldata dests
+        DestinationInput[] calldata dests,
+        bytes32                     expiredEventId,
+        bytes32                     holdId
     ) external returns (bytes32 eventId) {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(PAUSE_COORDINATOR_ROLE);
         if (dests.length == 0)        revert NoDestinations();
+        if (address(holdLedger) == address(0)) revert HoldLedgerNotSet();
 
+        // Guard: no active non-terminal event for this coin
         bytes32 coinKey  = keccak256(abi.encode(coin));
         bytes32 activeId = activeEventId[coinKey];
         if (activeId != bytes32(0) && !_isTerminal(_events[activeId].state)) {
             revert InvalidTransition(_events[activeId].state);
         }
 
+        // ── Six lineage checks ───────────────────────────────────────────────
+
+        IProtectionHoldLedger.ProtectionHold memory hold = holdLedger.getHold(holdId);
+
+        // Check 1: hold must still be active
+        if (!hold.active) revert HoldInactive(holdId);
+
+        // Check 2: hold belongs to the vault being resumed
+        address resumeVault = dests[0].vault;
+        if (hold.vault != resumeVault)
+            revert HoldVaultMismatch(holdId, hold.vault, resumeVault);
+
+        // Check 3: hold covers this specific asset
+        bytes32 assetId = bytes32(uint256(uint160(coin)));
+        if (hold.assetId != assetId)
+            revert HoldAssetMismatch(holdId, hold.assetId, assetId);
+
+        DepegEvent storage parentEv = _events[expiredEventId];
+        _requireExists(parentEv);
+
+        // Check 4: hold and expired event share the same originating incident
+        if (hold.rootIncidentId != parentEv.rootIncidentId)
+            revert HoldIncidentMismatch(holdId, hold.rootIncidentId, parentEv.rootIncidentId);
+
+        // Check 5: expired event was tracking this same coin (independent belt-and-suspenders)
+        if (parentEv.coin != coin)
+            revert EventAssetMismatch(expiredEventId, coin, parentEv.coin);
+
+        // Check 6: parent must be EXPIRED — FAILED, SUPERSEDED, and NORMAL are not continuable
+        if (!_isTerminalContinuable(parentEv.state))
+            revert NotTerminalContinuable(expiredEventId, parentEv.state);
+
+        // ── Create successor PROTECTED event, inheriting the incident root ──
+
         eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
         DepegEvent storage ev = _events[eventId];
         ev.coin                  = coin;
+        ev.rootIncidentId        = parentEv.rootIncidentId; // inherit from expired parent
         ev.state                 = State.PROTECTED;
         ev.compositeScore        = 0;
         ev.evidenceRoot          = evidenceRoot;
@@ -378,11 +485,13 @@ contract DepegEventRegistry {
     /// @notice DG4/DG5: re-mark specific FAILED destinations as PENDING for retry.
     ///         Only valid from PARTIALLY_PROTECTED or PARTIALLY_RECOVERED.
     ///         COMPLETE and SUPERSEDED slots are untouchable (DG5 reverts on them).
+    ///         Callable by KEEPER_ROLE (automated bots) or GOVERNANCE_ROLE (override).
     function retryFailedDestinations(
         bytes32            eventId,
         uint256[] calldata destIndices
     ) external {
-        if (msg.sender != controller) revert Unauthorized();
+        if (!_roles[KEEPER_ROLE][msg.sender] && !_roles[GOVERNANCE_ROLE][msg.sender])
+            revert Unauthorized();
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -430,7 +539,7 @@ contract DepegEventRegistry {
     /// @notice G14: terminate WATCH or CONFIRMED_DEPEG as SUPERSEDED.
     ///         Hard-reverts (G15) if state is PROTECTION_PENDING or beyond.
     function supersede(bytes32 eventId) external {
-        if (msg.sender != controller) revert Unauthorized();
+        _requireRole(GOVERNANCE_ROLE);
 
         DepegEvent storage ev = _events[eventId];
         _requireExists(ev);
@@ -482,6 +591,12 @@ contract DepegEventRegistry {
 
     function getActiveEventId(address coin) external view returns (bytes32) {
         return activeEventId[keccak256(abi.encode(coin))];
+    }
+
+    // ── Internal: role guard ──────────────────────────────────────────────────
+
+    function _requireRole(bytes32 role) internal view {
+        if (!_roles[role][msg.sender]) revert Unauthorized();
     }
 
     // ── Internal: score-driven transitions ────────────────────────────────────
@@ -613,6 +728,7 @@ contract DepegEventRegistry {
         eventId = keccak256(abi.encode(coin, block.timestamp, ++_nonce));
         DepegEvent storage ev = _events[eventId];
         ev.coin           = coin;
+        ev.rootIncidentId = eventId;
         ev.state          = State.WATCH;
         ev.compositeScore = score;
         ev.evidenceRoot   = evidenceRoot;
@@ -670,6 +786,10 @@ contract DepegEventRegistry {
             || s == State.EXPIRED
             || s == State.FAILED
             || s == State.SUPERSEDED;
+    }
+
+    function _isTerminalContinuable(State s) internal pure returns (bool) {
+        return s == State.EXPIRED; // only EXPIRED justifies a resumption; FAILED/SUPERSEDED/NORMAL do not
     }
 
     function _isProtectedFamily(State s) internal pure returns (bool) {

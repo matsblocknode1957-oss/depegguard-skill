@@ -1,0 +1,6 @@
+.env
+node_modules/
+dist/
+*.wasm
+secrets.yaml
+.cre_build_tmp.js
