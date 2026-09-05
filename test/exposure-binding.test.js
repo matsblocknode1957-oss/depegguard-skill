@@ -72,7 +72,7 @@ describe("ExposureRegistry binding", function () {
 
         // Deploy hold ledger with admin as initial coordinator; transferCoordinator after receiver deploy
         const ProtectionHoldLedger = await ethers.getContractFactory("ProtectionHoldLedger");
-        holdLedger = await ProtectionHoldLedger.deploy(admin.address);
+        holdLedger = await ProtectionHoldLedger.deploy(admin.address, admin.address);
 
         const StableGuardCREReceiver = await ethers.getContractFactory("StableGuardCREReceiver");
         receiver = await StableGuardCREReceiver.deploy(

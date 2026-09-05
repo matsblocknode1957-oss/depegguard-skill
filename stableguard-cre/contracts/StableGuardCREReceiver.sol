@@ -63,7 +63,9 @@ interface IProtectionHoldLedger {
  *   eventRegistry     DepegEventRegistry (must transferController to this address after deploy)
  *   vault             Target vault to pause on confirmed depeg
  *   localChainSelector CCIP chain selector for the local chain (used as destination ID)
- *   holdLedger        ProtectionHoldLedger (must transferCoordinator to this address after deploy)
+ *   holdLedger        ProtectionHoldLedger (must transferCoordinator to this address after deploy;
+ *                     governance on the ledger can call forceTransferCoordinator as an emergency
+ *                     override if this receiver becomes compromised or unresponsive)
  */
 contract StableGuardCREReceiver {
     address                public immutable forwarder;

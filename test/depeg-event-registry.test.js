@@ -61,7 +61,7 @@ describe("DepegEventRegistry", function () {
 
         // Deploy ledger with controller as coordinator; wire into registry
         const LedgerFactory = await ethers.getContractFactory("ProtectionHoldLedger");
-        ledger = await LedgerFactory.deploy(controller.address);
+        ledger = await LedgerFactory.deploy(controller.address, controller.address);
         await registry.connect(controller).setHoldLedger(await ledger.getAddress());
     });
 

@@ -11,13 +11,13 @@ const ROOT_B  = ethers.keccak256(ethers.toUtf8Bytes("incident-B"));
 
 describe("ProtectionHoldLedger", function () {
     let ledger;
-    let coordinator, other;
+    let governance, coordinator, other;
     let vaultA, vaultB;
 
     beforeEach(async function () {
-        [coordinator, other, vaultA, vaultB] = await ethers.getSigners();
+        [governance, coordinator, other, vaultA, vaultB] = await ethers.getSigners();
         const Factory = await ethers.getContractFactory("ProtectionHoldLedger");
-        ledger = await Factory.deploy(coordinator.address);
+        ledger = await Factory.deploy(governance.address, coordinator.address);
     });
 
     // Parse holdId from HoldAcquired event log
@@ -37,9 +37,19 @@ describe("ProtectionHoldLedger", function () {
             expect(await ledger.coordinator()).to.equal(coordinator.address);
         });
 
+        it("sets governance", async function () {
+            expect(await ledger.governance()).to.equal(governance.address);
+        });
+
         it("reverts with zero coordinator address", async function () {
             const Factory = await ethers.getContractFactory("ProtectionHoldLedger");
-            await expect(Factory.deploy(ethers.ZeroAddress))
+            await expect(Factory.deploy(governance.address, ethers.ZeroAddress))
+                .to.be.revertedWithCustomError(ledger, "ZeroAddress");
+        });
+
+        it("reverts with zero governance address", async function () {
+            const Factory = await ethers.getContractFactory("ProtectionHoldLedger");
+            await expect(Factory.deploy(ethers.ZeroAddress, coordinator.address))
                 .to.be.revertedWithCustomError(ledger, "ZeroAddress");
         });
     });
@@ -234,6 +244,60 @@ describe("ProtectionHoldLedger", function () {
             await expect(
                 ledger.connect(coordinator).transferCoordinator(ethers.ZeroAddress)
             ).to.be.revertedWithCustomError(ledger, "ZeroAddress");
+        });
+    });
+
+    // ── forceTransferCoordinator ───────────────────────────────────────────────
+
+    describe("forceTransferCoordinator", function () {
+        it("governance can force-rotate the coordinator", async function () {
+            await ledger.connect(governance).forceTransferCoordinator(other.address);
+            expect(await ledger.coordinator()).to.equal(other.address);
+        });
+
+        it("non-governance address cannot call forceTransferCoordinator (reverts Unauthorized)", async function () {
+            await expect(
+                ledger.connect(other).forceTransferCoordinator(other.address)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+        });
+
+        it("coordinator itself cannot call forceTransferCoordinator (reverts Unauthorized)", async function () {
+            await expect(
+                ledger.connect(coordinator).forceTransferCoordinator(other.address)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+        });
+
+        it("after force-rotation the old coordinator cannot acquire or release", async function () {
+            const holdId = await acquireHold(vaultA);
+
+            await ledger.connect(governance).forceTransferCoordinator(other.address);
+
+            await expect(
+                ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+
+            await expect(
+                ledger.connect(coordinator).release(holdId)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+        });
+
+        it("after force-rotation the new coordinator can acquire", async function () {
+            await ledger.connect(governance).forceTransferCoordinator(other.address);
+            await expect(
+                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A)
+            ).to.emit(ledger, "HoldAcquired");
+        });
+
+        it("reverts with ZeroAddress when newCoordinator is the zero address", async function () {
+            await expect(
+                ledger.connect(governance).forceTransferCoordinator(ethers.ZeroAddress)
+            ).to.be.revertedWithCustomError(ledger, "ZeroAddress");
+        });
+
+        it("emits CoordinatorTransferred", async function () {
+            await expect(ledger.connect(governance).forceTransferCoordinator(other.address))
+                .to.emit(ledger, "CoordinatorTransferred")
+                .withArgs(coordinator.address, other.address);
         });
     });
 });

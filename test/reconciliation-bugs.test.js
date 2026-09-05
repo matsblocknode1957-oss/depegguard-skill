@@ -139,7 +139,7 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
         flakyVault = await FlakyVaultFactory.deploy();
 
         const LedgerFactory = await ethers.getContractFactory("ProtectionHoldLedger");
-        holdLedger = await LedgerFactory.deploy(admin.address);
+        holdLedger = await LedgerFactory.deploy(admin.address, admin.address);
 
         const ExposureRegistry = await ethers.getContractFactory("ExposureRegistry");
         registry = await ExposureRegistry.deploy(admin.address);
@@ -216,7 +216,7 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
         flakyVault = await FlakyVaultFactory.deploy();
 
         const LedgerFactory = await ethers.getContractFactory("ProtectionHoldLedger");
-        holdLedger = await LedgerFactory.deploy(admin.address);
+        holdLedger = await LedgerFactory.deploy(admin.address, admin.address);
 
         const ExposureRegistry = await ethers.getContractFactory("ExposureRegistry");
         registry = await ExposureRegistry.deploy(admin.address);

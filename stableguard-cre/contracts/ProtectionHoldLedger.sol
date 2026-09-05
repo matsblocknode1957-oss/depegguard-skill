@@ -20,6 +20,7 @@ contract ProtectionHoldLedger {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
+    address public immutable governance;
     address public coordinator;
 
     mapping(bytes32 => ProtectionHold) public holds;
@@ -51,8 +52,10 @@ contract ProtectionHoldLedger {
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
-    constructor(address _coordinator) {
-        if (_coordinator == address(0)) revert ZeroAddress();
+    constructor(address _governance, address _coordinator) {
+        if (_governance   == address(0)) revert ZeroAddress();
+        if (_coordinator  == address(0)) revert ZeroAddress();
+        governance  = _governance;
         coordinator = _coordinator;
     }
 
@@ -66,6 +69,18 @@ contract ProtectionHoldLedger {
 
     function transferCoordinator(address newCoordinator) external {
         if (msg.sender != coordinator) revert Unauthorized();
+        if (newCoordinator == address(0)) revert ZeroAddress();
+        address old = coordinator;
+        coordinator = newCoordinator;
+        emit CoordinatorTransferred(old, newCoordinator);
+    }
+
+    // ── forceTransferCoordinator ──────────────────────────────────────────────
+
+    /// @notice Emergency override: governance can rotate the coordinator even if
+    ///         the current coordinator is compromised or unresponsive.
+    function forceTransferCoordinator(address newCoordinator) external {
+        if (msg.sender != governance) revert Unauthorized();
         if (newCoordinator == address(0)) revert ZeroAddress();
         address old = coordinator;
         coordinator = newCoordinator;
