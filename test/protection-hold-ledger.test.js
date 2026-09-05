@@ -9,6 +9,10 @@ const ASSET_B = ethers.keccak256(ethers.toUtf8Bytes("USDT"));
 const ROOT_A  = ethers.keccak256(ethers.toUtf8Bytes("incident-A"));
 const ROOT_B  = ethers.keccak256(ethers.toUtf8Bytes("incident-B"));
 
+// Mirrors ProtectionHoldLedger.FreezeMode enum values
+const FREEZE_MODE_FULL_FREEZE         = 0n;
+const FREEZE_MODE_DEPOSIT_ONLY_FREEZE = 1n;
+
 describe("ProtectionHoldLedger", function () {
     let ledger;
     let governance, coordinator, other;
@@ -21,8 +25,8 @@ describe("ProtectionHoldLedger", function () {
     });
 
     // Parse holdId from HoldAcquired event log
-    async function acquireHold(vault, root = ROOT_A, asset = ASSET_A) {
-        const tx = await ledger.connect(coordinator).acquire(vault.address, root, asset);
+    async function acquireHold(vault, root = ROOT_A, asset = ASSET_A, mode = FREEZE_MODE_FULL_FREEZE) {
+        const tx = await ledger.connect(coordinator).acquire(vault.address, root, asset, mode);
         const receipt = await tx.wait();
         const parsed = receipt.logs
             .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -69,7 +73,14 @@ describe("ProtectionHoldLedger", function () {
             expect(h.rootIncidentId).to.equal(ROOT_A);
             expect(h.assetId).to.equal(ASSET_A);
             expect(h.vault).to.equal(vaultA.address);
+            expect(h.requiredMode).to.equal(FREEZE_MODE_FULL_FREEZE);
             expect(h.active).to.equal(true);
+        });
+
+        it("writes DEPOSIT_ONLY_FREEZE mode correctly", async function () {
+            const holdId = await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+            const h = await ledger.holds(holdId);
+            expect(h.requiredMode).to.equal(FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
         });
 
         it("increments activeHoldCount for the vault", async function () {
@@ -94,20 +105,20 @@ describe("ProtectionHoldLedger", function () {
         });
 
         it("emits HoldAcquired with correct args", async function () {
-            await expect(ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A))
+            await expect(ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE))
                 .to.emit(ledger, "HoldAcquired")
-                .withArgs(anyValue, ROOT_A, ASSET_A, vaultA.address);
+                .withArgs(anyValue, ROOT_A, ASSET_A, vaultA.address, FREEZE_MODE_FULL_FREEZE);
         });
 
         it("reverts from non-coordinator", async function () {
             await expect(
-                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A)
+                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.be.revertedWithCustomError(ledger, "Unauthorized");
         });
 
         it("reverts with zero vault address", async function () {
             await expect(
-                ledger.connect(coordinator).acquire(ethers.ZeroAddress, ROOT_A, ASSET_A)
+                ledger.connect(coordinator).acquire(ethers.ZeroAddress, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.be.revertedWithCustomError(ledger, "ZeroAddress");
         });
     });
@@ -221,10 +232,10 @@ describe("ProtectionHoldLedger", function () {
         it("new coordinator can acquire holds; old coordinator cannot", async function () {
             await ledger.connect(coordinator).transferCoordinator(other.address);
             await expect(
-                ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A)
+                ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.be.revertedWithCustomError(ledger, "Unauthorized");
             await expect(
-                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A)
+                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.emit(ledger, "HoldAcquired");
         });
 
@@ -273,7 +284,7 @@ describe("ProtectionHoldLedger", function () {
             await ledger.connect(governance).forceTransferCoordinator(other.address);
 
             await expect(
-                ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A)
+                ledger.connect(coordinator).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.be.revertedWithCustomError(ledger, "Unauthorized");
 
             await expect(
@@ -284,7 +295,7 @@ describe("ProtectionHoldLedger", function () {
         it("after force-rotation the new coordinator can acquire", async function () {
             await ledger.connect(governance).forceTransferCoordinator(other.address);
             await expect(
-                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A)
+                ledger.connect(other).acquire(vaultA.address, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE)
             ).to.emit(ledger, "HoldAcquired");
         });
 
@@ -298,6 +309,70 @@ describe("ProtectionHoldLedger", function () {
             await expect(ledger.connect(governance).forceTransferCoordinator(other.address))
                 .to.emit(ledger, "CoordinatorTransferred")
                 .withArgs(coordinator.address, other.address);
+        });
+    });
+
+    // ── requiredFreezeMode ─────────────────────────────────────────────────────
+
+    describe("requiredFreezeMode", function () {
+        it("returns FULL_FREEZE when a FULL_FREEZE hold is active", async function () {
+            await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE);
+            expect(await ledger.requiredFreezeMode(vaultA.address))
+                .to.equal(FREEZE_MODE_FULL_FREEZE);
+        });
+
+        it("returns DEPOSIT_ONLY_FREEZE when only a DEPOSIT_ONLY hold is active", async function () {
+            await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+            expect(await ledger.requiredFreezeMode(vaultA.address))
+                .to.equal(FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+        });
+
+        it("reverts NoActiveHolds when called on a vault with zero active holds", async function () {
+            await expect(ledger.requiredFreezeMode(vaultA.address))
+                .to.be.revertedWithCustomError(ledger, "NoActiveHolds")
+                .withArgs(vaultA.address);
+        });
+
+        it("FULL_FREEZE dominates when holds of both modes coexist", async function () {
+            await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE);
+            await acquireHold(vaultA, ROOT_B, ASSET_B, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+            expect(await ledger.requiredFreezeMode(vaultA.address))
+                .to.equal(FREEZE_MODE_FULL_FREEZE);
+        });
+
+        it("downgrades to DEPOSIT_ONLY_FREEZE after the FULL_FREEZE hold is released", async function () {
+            const fullId    = await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE);
+            const depositId = await acquireHold(vaultA, ROOT_B, ASSET_B, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+            // vaultA has both; mode is FULL_FREEZE
+            expect(await ledger.requiredFreezeMode(vaultA.address)).to.equal(FREEZE_MODE_FULL_FREEZE);
+
+            await ledger.connect(coordinator).release(fullId);
+            // One hold remains — the DEPOSIT_ONLY one
+            expect(await ledger.activeHoldCount(vaultA.address)).to.equal(1);
+            expect(await ledger.requiredFreezeMode(vaultA.address))
+                .to.equal(FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+
+            await ledger.connect(coordinator).release(depositId);
+            expect(await ledger.activeHoldCount(vaultA.address)).to.equal(0);
+        });
+
+        it("stays FULL_FREEZE after a DEPOSIT_ONLY hold is released while a FULL_FREEZE hold remains", async function () {
+            const fullId    = await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE);
+            const depositId = await acquireHold(vaultA, ROOT_B, ASSET_B, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+
+            await ledger.connect(coordinator).release(depositId);
+            expect(await ledger.activeHoldCount(vaultA.address)).to.equal(1);
+            expect(await ledger.requiredFreezeMode(vaultA.address))
+                .to.equal(FREEZE_MODE_FULL_FREEZE);
+
+            await ledger.connect(coordinator).release(fullId);
+        });
+
+        it("vaults have independent requiredFreezeMode", async function () {
+            await acquireHold(vaultA, ROOT_A, ASSET_A, FREEZE_MODE_FULL_FREEZE);
+            await acquireHold(vaultB, ROOT_B, ASSET_B, FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
+            expect(await ledger.requiredFreezeMode(vaultA.address)).to.equal(FREEZE_MODE_FULL_FREEZE);
+            expect(await ledger.requiredFreezeMode(vaultB.address)).to.equal(FREEZE_MODE_DEPOSIT_ONLY_FREEZE);
         });
     });
 });

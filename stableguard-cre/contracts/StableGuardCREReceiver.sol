@@ -35,10 +35,15 @@ interface IDepegEventRegistry {
 }
 
 interface IProtectionHoldLedger {
-    function acquire(address vault, bytes32 rootIncidentId, bytes32 assetId)
+    // Mirrors ProtectionHoldLedger.FreezeMode and ExposureRegistry.FreezeMode (PR #4).
+    // Values are ABI-compatible across all three definitions.
+    enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
+
+    function acquire(address vault, bytes32 rootIncidentId, bytes32 assetId, FreezeMode mode)
         external returns (bytes32 holdId);
     function release(bytes32 holdId) external returns (bool vaultFullyReleased);
     function activeHoldCount(address vault) external view returns (uint256);
+    function requiredFreezeMode(address vault) external view returns (FreezeMode);
 }
 
 /**
@@ -249,7 +254,22 @@ contract StableGuardCREReceiver {
                         vaultFullyReleased = true;
                     }
 
-                    bool unpaused = !vaultFullyReleased; // true when no unpause needed
+                    // Partial release: if remaining holds are less restrictive, downgrade
+                    // the vault freeze level without fully unpausing.  Currently dead code
+                    // (all holds on this branch are FULL_FREEZE), activated when PR #4
+                    // (freeze-mode-config) merges and DEPOSIT_ONLY_FREEZE holds exist.
+                    if (!vaultFullyReleased
+                        && holdLedger.activeHoldCount(vault) > 0
+                        && holdLedger.requiredFreezeMode(vault) == IProtectionHoldLedger.FreezeMode.DEPOSIT_ONLY_FREEZE
+                        && IPausable(vault).paused())
+                    {
+                        try IPausable(vault).unpause() { }
+                        catch (bytes memory reason) {
+                            emit VaultUnpauseFailed(vault, sym, reason);
+                        }
+                    }
+
+                    bool unpaused = !vaultFullyReleased; // true when no full-unpause needed
                     if (vaultFullyReleased) {
                         try IPausable(vault).unpause() { unpaused = true; }
                         catch (bytes memory reason) {
@@ -325,10 +345,13 @@ contract StableGuardCREReceiver {
                 }
             }
 
-            // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events)
+            // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events).
+            // This branch only calls vault.pause() (FULL_FREEZE). When PR #4 (freeze-mode-config)
+            // merges, this becomes exposureRegistry.vaultFreezeMode(vault) and the matching
+            // pause() vs pauseDeposits() call is chosen accordingly.
             bool holdAcquired = false;
             if (pauseResult) {
-                try holdLedger.acquire(vault, bytes32(eventId), sym)
+                try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode.FULL_FREEZE)
                     returns (bytes32 hId)
                 {
                     _coinHoldId[coin] = hId;
