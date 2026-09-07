@@ -8,6 +8,7 @@ contract MockFlakyVault {
     bool    public paused;
     uint256 public pauseCallCount;
     bool    public unpauseReverts;
+    bool    public depositsFrozen;
 
     error UnpauseForcedRevert();
 
@@ -23,5 +24,13 @@ contract MockFlakyVault {
 
     function setUnpauseReverts(bool _reverts) external {
         unpauseReverts = _reverts;
+    }
+
+    function pauseDeposits() external {
+        depositsFrozen = true;
+    }
+
+    function unpauseDeposits() external {
+        depositsFrozen = false;
     }
 }

@@ -5,6 +5,9 @@ contract MockVault {
     bool    public paused;
     uint256 public pauseCallCount;
 
+    bool    public depositsFrozen;
+    uint256 public depositPauseCallCount;
+
     function pause() external {
         paused = true;
         pauseCallCount++;
@@ -12,5 +15,14 @@ contract MockVault {
 
     function unpause() external {
         paused = false;
+    }
+
+    function pauseDeposits() external {
+        depositsFrozen = true;
+        depositPauseCallCount++;
+    }
+
+    function unpauseDeposits() external {
+        depositsFrozen = false;
     }
 }

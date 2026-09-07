@@ -2,13 +2,18 @@
 pragma solidity 0.8.24;
 
 interface IExposureRegistry {
+    enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
     function isExposed(address vault, bytes32 symbol) external view returns (bool);
+    function vaultFreezeMode(address vault) external view returns (FreezeMode);
 }
 
 interface IPausable {
     function pause() external;
     function unpause() external;
     function paused() external view returns (bool);
+    function pauseDeposits() external;
+    function unpauseDeposits() external;
+    function depositsFrozen() external view returns (bool);
 }
 
 interface IDepegEventRegistry {
@@ -57,7 +62,7 @@ interface IProtectionHoldLedger {
  * Per-coin call sequence in onReport() (each call independently try/caught):
  *   1. eventRegistry.processReport   — advance state machine
  *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
- *   3. vault.pause()                 — exposure-gated; outcome captured in bool
+ *   3. vault.pause() or pauseDeposits() — mode-gated; outcome captured in bool
  *   4. holdLedger.acquire()          — record hold identity after successful pause
  *   5. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
  *
@@ -237,7 +242,7 @@ contract StableGuardCREReceiver {
             // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
             // and on subsequent cycles until the destination slot is settled.
             if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
-                if (IPausable(vault).paused()) {
+                if (IPausable(vault).paused() || IPausable(vault).depositsFrozen()) {
                     bytes32 hId = _coinHoldId[coin];
                     bool holdReleased = false;
                     bool vaultFullyReleased = false;
@@ -254,27 +259,47 @@ contract StableGuardCREReceiver {
                         vaultFullyReleased = true;
                     }
 
-                    // Partial release: if remaining holds are less restrictive, downgrade
-                    // the vault freeze level without fully unpausing.  Currently dead code
-                    // (all holds on this branch are FULL_FREEZE), activated when PR #4
-                    // (freeze-mode-config) merges and DEPOSIT_ONLY_FREEZE holds exist.
-                    if (!vaultFullyReleased
-                        && holdLedger.activeHoldCount(vault) > 0
-                        && holdLedger.requiredFreezeMode(vault) == IProtectionHoldLedger.FreezeMode.DEPOSIT_ONLY_FREEZE
-                        && IPausable(vault).paused())
-                    {
-                        try IPausable(vault).unpause() { }
-                        catch (bytes memory reason) {
-                            emit VaultUnpauseFailed(vault, sym, reason);
+                    if (vaultFullyReleased) {
+                        // Unfreeze based on actual vault state, not the configured freeze mode.
+                        // Handles mid-incident mode changes: vault.paused() / depositsFrozen()
+                        // reflect what was applied, not what mode is currently configured.
+                        if (IPausable(vault).paused()) {
+                            try IPausable(vault).unpause() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                        }
+                        if (IPausable(vault).depositsFrozen()) {
+                            try IPausable(vault).unpauseDeposits() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                        }
+                    } else if (holdLedger.activeHoldCount(vault) > 0) {
+                        // Partial release / downgrade: remaining holds only require
+                        // DEPOSIT_ONLY_FREEZE but vault is currently fully paused.
+                        // Step down: remove the full pause then apply the lighter deposit freeze.
+                        IProtectionHoldLedger.FreezeMode aggMode = holdLedger.requiredFreezeMode(vault);
+                        if (aggMode == IProtectionHoldLedger.FreezeMode.DEPOSIT_ONLY_FREEZE
+                            && IPausable(vault).paused())
+                        {
+                            try IPausable(vault).unpause() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                            try IPausable(vault).pauseDeposits() { }
+                            catch (bytes memory reason) {
+                                emit VaultPauseFailed(vault, sym, reason);
+                            }
                         }
                     }
 
-                    bool unpaused = !vaultFullyReleased; // true when no full-unpause needed
+                    // Partial release: downgrade is best-effort; callback depends only on holdReleased.
+                    // Full release: re-check actual vault state — both unfreeze ops are fire-and-forget,
+                    // so re-reading confirms whether they succeeded.
+                    bool unpaused = !vaultFullyReleased;
                     if (vaultFullyReleased) {
-                        try IPausable(vault).unpause() { unpaused = true; }
-                        catch (bytes memory reason) {
-                            emit VaultUnpauseFailed(vault, sym, reason);
-                        }
+                        unpaused = !IPausable(vault).paused() && !IPausable(vault).depositsFrozen();
                     }
 
                     IDepegEventRegistry.DestState cbState = (holdReleased && unpaused)
@@ -294,7 +319,7 @@ contract StableGuardCREReceiver {
             // Fires when the prior PROTECTED event expired before stableCount
             // reached stabilityWindow. The vault is still paused and needs
             // a fresh PROTECTED event to re-arm auto-recovery.
-            if (eventId == bytes32(0) && IPausable(vault).paused()) {
+            if (eventId == bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
                 IDepegEventRegistry.DestinationInput[] memory resumeDests =
                     new IDepegEventRegistry.DestinationInput[](1);
                 resumeDests[0] = IDepegEventRegistry.DestinationInput({
@@ -333,25 +358,37 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
-            // Call 3: pause vault; skip re-pause if vault already protected by another hold
+            // Call 3: freeze vault (full or deposit-only) per the customer's registered mode.
+            // Skip the freeze call if another hold already has the vault in the appropriate
+            // frozen state — check the mode-specific flag so FULL_FREEZE checks paused()
+            // and DEPOSIT_ONLY_FREEZE checks depositsFrozen().
+            IExposureRegistry.FreezeMode freezeMode = exposureRegistry.vaultFreezeMode(vault);
+            bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
+                ? IPausable(vault).paused()
+                : IPausable(vault).depositsFrozen();
+
             bool pauseResult = false;
-            if (holdLedger.activeHoldCount(vault) > 0 && IPausable(vault).paused()) {
+            if (holdLedger.activeHoldCount(vault) > 0 && alreadyFrozen) {
                 pauseResult = true;
-            } else {
+            } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
                 try IPausable(vault).pause() {
+                    pauseResult = true;
+                } catch (bytes memory reason) {
+                    emit VaultPauseFailed(vault, sym, reason);
+                }
+            } else {
+                try IPausable(vault).pauseDeposits() {
                     pauseResult = true;
                 } catch (bytes memory reason) {
                     emit VaultPauseFailed(vault, sym, reason);
                 }
             }
 
-            // Call 4: acquire hold after successful pause (eventId == rootIncidentId for new events).
-            // This branch only calls vault.pause() (FULL_FREEZE). When PR #4 (freeze-mode-config)
-            // merges, this becomes exposureRegistry.vaultFreezeMode(vault) and the matching
-            // pause() vs pauseDeposits() call is chosen accordingly.
+            // Call 4: acquire hold — pass the actual freeze mode so the ledger records
+            // what level this hold requires, enabling downgrade tracking in partial releases.
             bool holdAcquired = false;
             if (pauseResult) {
-                try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode.FULL_FREEZE)
+                try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
                     returns (bytes32 hId)
                 {
                     _coinHoldId[coin] = hId;
