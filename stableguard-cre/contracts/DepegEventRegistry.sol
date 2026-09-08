@@ -28,13 +28,17 @@ pragma solidity 0.8.24;
 ///   Any non-terminal state → EXPIRED  when  block.timestamp ≥ createdAt + eventTTL  (highest priority)
 ///   PROTECTION_PENDING / RECOVERY_PENDING → FAILED  when  pendingTTL elapsed
 ///   WATCH / CONFIRMED_DEPEG → SUPERSEDED  via  supersede()  (blocked at PROTECTION_PENDING and beyond)
+// Must match ProtectionHoldLedger.FreezeMode (same values, ABI-compatible).
+enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
+
 interface IProtectionHoldLedger {
     struct ProtectionHold {
-        bytes32 holdId;
-        bytes32 rootIncidentId;
-        bytes32 assetId;
-        address vault;
-        bool    active;
+        bytes32    holdId;
+        bytes32    rootIncidentId;
+        bytes32    assetId;
+        address    vault;
+        FreezeMode requiredMode;
+        bool       active;
     }
     function getHold(bytes32 holdId) external view returns (ProtectionHold memory);
 }

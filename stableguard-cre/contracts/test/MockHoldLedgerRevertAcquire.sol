@@ -9,7 +9,7 @@ contract MockHoldLedgerRevertAcquire {
 
     error AcquireAlwaysFails();
 
-    function acquire(address, bytes32, bytes32) external pure returns (bytes32) {
+    function acquire(address, bytes32, bytes32, uint8) external pure returns (bytes32) {
         revert AcquireAlwaysFails();
     }
 

@@ -8,6 +8,9 @@ const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 // ── Constants matching constructor args ────────────────────────────────────────
 
+// Mirrors ProtectionHoldLedger.FreezeMode enum values
+const FREEZE_MODE_FULL_FREEZE = 0n;
+
 const WATCH_THRESHOLD    = 1;
 const CONFIRMED_THRESHOLD = 2;
 const STABILITY_WINDOW   = 3;        // consecutive stable reports for auto-recovery (illustrative)
@@ -227,7 +230,7 @@ describe("DepegEventRegistry", function () {
 
             const resumeVaultAddr = ethers.Wallet.createRandom().address;
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx0 = await ledger.connect(controller).acquire(resumeVaultAddr, parentEv.rootIncidentId, assetId);
+            const tx0 = await ledger.connect(controller).acquire(resumeVaultAddr, parentEv.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const r0 = await tx0.wait();
             const holdId = r0.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -931,7 +934,7 @@ describe("DepegEventRegistry", function () {
             const ev = await registry.getDepegEvent(expiredId);
             const assetId = ethers.zeroPadValue(coin, 32);
             const tx = await ledger.connect(controller).acquire(
-                resumeVaultAddr, ev.rootIncidentId, assetId
+                resumeVaultAddr, ev.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE
             );
             const receipt = await tx.wait();
             const parsed = receipt.logs
@@ -1030,7 +1033,7 @@ describe("DepegEventRegistry", function () {
 
             // Acquire a hold for incident B
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, evB.rootIncidentId, assetId);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, evB.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const receipt = await tx.wait();
             const parsed = receipt.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -1059,7 +1062,7 @@ describe("DepegEventRegistry", function () {
             const resumeVaultAddr = ethers.Wallet.createRandom().address;
             const coinBAssetId = ethers.zeroPadValue(coinB.address, 32);
             const tx = await ledger.connect(controller).acquire(
-                resumeVaultAddr, evA.rootIncidentId, coinBAssetId
+                resumeVaultAddr, evA.rootIncidentId, coinBAssetId, FREEZE_MODE_FULL_FREEZE
             );
             const receipt = await tx.wait();
             const parsed = receipt.logs
@@ -1084,7 +1087,7 @@ describe("DepegEventRegistry", function () {
             const ev = await registry.getDepegEvent(id);
             const resumeVaultAddr = ethers.Wallet.createRandom().address;
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const receipt = await tx.wait();
             const parsed = receipt.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -1108,7 +1111,7 @@ describe("DepegEventRegistry", function () {
             const ev = await registry.getDepegEvent(id);
             const resumeVaultAddr = ethers.Wallet.createRandom().address;
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const receipt = await tx.wait();
             const parsed = receipt.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -1132,7 +1135,7 @@ describe("DepegEventRegistry", function () {
             const ev = await registry.getDepegEvent(id);
             const resumeVaultAddr = ethers.Wallet.createRandom().address;
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const receipt = await tx.wait();
             const parsed = receipt.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -1191,7 +1194,7 @@ describe("DepegEventRegistry", function () {
 
             const ev = await registry.getDepegEvent(expiredId);
             const assetId = ethers.zeroPadValue(coinA.address, 32);
-            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId);
+            const tx = await ledger.connect(controller).acquire(resumeVaultAddr, ev.rootIncidentId, assetId, FREEZE_MODE_FULL_FREEZE);
             const receipt = await tx.wait();
             const parsed = receipt.logs
                 .map(l => { try { return ledger.interface.parseLog(l); } catch { return null; } })
@@ -1409,7 +1412,7 @@ describe("DepegEventRegistry", function () {
             const fakeAsset = ethers.zeroPadValue(coinA.address, 32);
             await expect(
                 ledger.connect(receiver).acquire(
-                    ethers.Wallet.createRandom().address, fakeRoot, fakeAsset
+                    ethers.Wallet.createRandom().address, fakeRoot, fakeAsset, FREEZE_MODE_FULL_FREEZE
                 )
             ).to.be.revertedWithCustomError(ledger, "Unauthorized");
 
@@ -1425,7 +1428,7 @@ describe("DepegEventRegistry", function () {
             // Ledger: acquire succeeds — is now coordinator
             await expect(
                 ledger.connect(newReceiver).acquire(
-                    ethers.Wallet.createRandom().address, fakeRoot, fakeAsset
+                    ethers.Wallet.createRandom().address, fakeRoot, fakeAsset, FREEZE_MODE_FULL_FREEZE
                 )
             ).to.emit(ledger, "HoldAcquired");
         });

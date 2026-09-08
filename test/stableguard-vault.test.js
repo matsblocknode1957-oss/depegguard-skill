@@ -7,9 +7,9 @@ const { expect } = require("chai");
 const DEPOSIT = ethers.parseUnits("1000", 6);
 const HALF    = ethers.parseUnits("500", 6);
 
-const PAUSE_THRESHOLD = 2;
-
+let _ts = 0n;
 function encodeReport(coins, signalLevels, compositeScore) {
+    const observedAt = ++_ts;
     return ethers.AbiCoder.defaultAbiCoder().encode(
         ["address[]", "uint256[]", "uint256[]", "uint8[]", "bytes[]", "uint8", "uint8", "uint256"],
         [
@@ -20,7 +20,7 @@ function encodeReport(coins, signalLevels, compositeScore) {
             coins.map(() => "0x"),
             compositeScore,
             1,
-            BigInt(Math.floor(Date.now() / 1000)),
+            observedAt,
         ]
     );
 }
@@ -479,30 +479,59 @@ describe("StableGuardVault", function () {
 
     // ── Integration with StableGuardCREReceiver ───────────────────────────────
 
-    describe("integration with StableGuardCREReceiver (main-branch)", function () {
-        let receiver, exposureRegistry, forwarder, coinA;
+    describe("integration with StableGuardCREReceiver", function () {
+        const LOCAL_CHAIN_SELECTOR = 1n;
+        const WATCH_THRESHOLD      = 1;
+        const CONFIRMED_THRESHOLD  = 2;
+        const STABILITY_WINDOW     = 3;
+        const EVENT_TTL            = 86400n;
+        const PENDING_TTL          = 3600n;
+        const RECOVERY_COOLDOWN    = 900n;
+        const MAX_REPORT_AGE       = 604800n;
+
+        let receiver, exposureRegistry, eventRegistry, holdLedger, forwarder, coinA;
 
         beforeEach(async function () {
-            [, , , , , , , forwarder, , coinA] = await ethers.getSigners();
+            [, , , , , forwarder, coinA] = await ethers.getSigners();
+            _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 1000n;
 
             const ExposureRegistry = await ethers.getContractFactory("ExposureRegistry");
             exposureRegistry = await ExposureRegistry.deploy(governance.address);
+
+            const DepegEventRegistry = await ethers.getContractFactory("DepegEventRegistry");
+            eventRegistry = await DepegEventRegistry.deploy(
+                governance.address,
+                WATCH_THRESHOLD,
+                CONFIRMED_THRESHOLD,
+                STABILITY_WINDOW,
+                EVENT_TTL,
+                PENDING_TTL,
+                RECOVERY_COOLDOWN
+            );
+
+            const ProtectionHoldLedger = await ethers.getContractFactory("ProtectionHoldLedger");
+            holdLedger = await ProtectionHoldLedger.deploy(governance.address, governance.address);
 
             const StableGuardCREReceiver = await ethers.getContractFactory("StableGuardCREReceiver");
             receiver = await StableGuardCREReceiver.deploy(
                 forwarder.address,
                 await exposureRegistry.getAddress(),
+                await eventRegistry.getAddress(),
                 await vault.getAddress(),
-                PAUSE_THRESHOLD
+                LOCAL_CHAIN_SELECTOR,
+                await holdLedger.getAddress(),
+                MAX_REPORT_AGE
             );
 
-            // Grant PAUSE_COORDINATOR_ROLE to the receiver — this is the critical wiring step
+            await eventRegistry.connect(governance).setHoldLedger(await holdLedger.getAddress());
+            await eventRegistry.connect(governance).transferController(await receiver.getAddress());
+            await holdLedger.connect(governance).transferCoordinator(await receiver.getAddress());
+
             await vault.connect(governance).grantRole(
                 await vault.PAUSE_COORDINATOR_ROLE(),
                 await receiver.getAddress()
             );
 
-            // Register vault's exposure to coinA
             await exposureRegistry.connect(governance).registerExposure(
                 await vault.getAddress(),
                 addrToBytes32(coinA.address)
@@ -510,41 +539,32 @@ describe("StableGuardVault", function () {
         });
 
         it("receiver pauses vault when a depeg alert fires for a registered coin", async function () {
-            const report = encodeReport([coinA.address], [1], PAUSE_THRESHOLD);
-            await receiver.connect(forwarder).onReport("0x", report);
+            await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
             expect(await vault.paused()).to.equal(true);
         });
 
         it("deposits are blocked after receiver-triggered pause", async function () {
-            const report = encodeReport([coinA.address], [1], PAUSE_THRESHOLD);
-            await receiver.connect(forwarder).onReport("0x", report);
-
+            await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
             await expect(vault.connect(alice).deposit(HALF, alice.address))
                 .to.be.revertedWithCustomError(vault, "VaultFullyFrozen");
         });
 
         it("withdrawals are blocked after receiver-triggered full pause", async function () {
             await vault.connect(alice).deposit(DEPOSIT, alice.address);
-            const report = encodeReport([coinA.address], [1], PAUSE_THRESHOLD);
-            await receiver.connect(forwarder).onReport("0x", report);
+            await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
 
             const shares = await vault.balanceOf(alice.address);
             await expect(vault.connect(alice).redeem(shares, alice.address, alice.address))
                 .to.be.revertedWithCustomError(vault, "VaultFullyFrozen");
         });
 
-        it("receiver can unpause vault directly (governance delegates unpause to coordinator)", async function () {
-            const report = encodeReport([coinA.address], [1], PAUSE_THRESHOLD);
-            await receiver.connect(forwarder).onReport("0x", report);
+        it("auto-recovery unpauses vault after STABILITY_WINDOW stable reports", async function () {
+            await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
             expect(await vault.paused()).to.equal(true);
 
-            // In production, unpause is triggered by the receiver's auto-recovery path.
-            // Here we call it directly to confirm the role is wired correctly.
-            await vault.connect(governance).grantRole(
-                await vault.PAUSE_COORDINATOR_ROLE(),
-                governance.address
-            );
-            await vault.connect(governance).unpause();
+            for (let i = 0; i < STABILITY_WINDOW; i++) {
+                await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [0], 0));
+            }
             expect(await vault.paused()).to.equal(false);
         });
 
@@ -555,11 +575,14 @@ describe("StableGuardVault", function () {
         });
 
         it("VaultExposureMissing fires and vault stays unpaused when exposure not registered", async function () {
-            const [, , , , , , , , unregisteredCoin] = await ethers.getSigners();
-            const report = encodeReport([unregisteredCoin.address], [1], PAUSE_THRESHOLD);
+            const [, , , , , , , unregisteredCoin] = await ethers.getSigners();
+            const vaultAddr = await vault.getAddress();
 
-            await expect(receiver.connect(forwarder).onReport("0x", report))
-                .to.emit(receiver, "VaultExposureMissing");
+            await expect(
+                receiver.connect(forwarder).onReport("0x", encodeReport([unregisteredCoin.address], [2], 2))
+            )
+                .to.emit(receiver, "VaultExposureMissing")
+                .withArgs(vaultAddr, addrToBytes32(unregisteredCoin.address));
 
             expect(await vault.paused()).to.equal(false);
         });
