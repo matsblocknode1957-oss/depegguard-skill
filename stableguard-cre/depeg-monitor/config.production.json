@@ -1,7 +1,7 @@
 {
   "schedule": "0 */5 * * * *",
   "chainSelectorName": "ethereum-testnet-sepolia",
-  "consumerAddress": "NEED: deploy StableGuardCREReceiver.sol with KeystoneForwarder (0xF8344CFd5c43616a4366C34E3EEE75af79a74482) as constructor arg, paste deployed address here",
+  "consumerAddress": "0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b",
   "monitorAddress": "0x44930ef915b30CbA75C0B94d62cE516d7900d27C",
   "dataStreamsBaseUrl": "https://api.chain.link",
   "coins": [
