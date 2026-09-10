@@ -90,7 +90,7 @@ Extract `fear_and_greed_index.value` (0–100) and `fear_and_greed_index.value_c
 
 | Score | Classification | Depeg Signal Adjustment |
 |---|---|---|
-| 0–25 | Extreme Fear | Market stress elevated — depeg signals more likely to escalate; treat WATCH as HEDGE urgency |
+| 0–25 | Extreme Fear | Market stress elevated — depeg signals more likely to escalate; treat WATCH as ELEVATED urgency |
 | 26–45 | Fear | Caution — monitor closely; standard signal thresholds apply with increased frequency |
 | 46–55 | Neutral | Normal conditions — standard signal thresholds apply |
 | 56–75 | Greed | Overleveraged market — liquidation risk elevated; depeg contagion spreads faster |
@@ -98,9 +98,9 @@ Extract `fear_and_greed_index.value` (0–100) and `fear_and_greed_index.value_c
 
 **Critical escalation rule:**
 
-> **Extreme Greed (76–100) + HEDGE signal = treat as EXIT level urgency.**
+> **Extreme Greed (76–100) + ELEVATED signal = treat as CRITICAL level urgency.**
 
-When the Fear & Greed Index is in Extreme Greed territory, the market is likely over-leveraged and crowded into risk assets. A stablecoin depeg at this point can trigger cascading liquidations with limited liquidity to absorb selling. The HEDGE threshold (50–99 bps) under these conditions carries the same exit urgency as the EXIT threshold (100+ bps) under normal conditions. Rotate the full position immediately rather than a partial 30–50% reduction.
+When the Fear & Greed Index is in Extreme Greed territory, the market is likely over-leveraged and crowded into risk assets. A stablecoin depeg at this point can trigger cascading liquidations with limited liquidity to absorb selling. The ELEVATED threshold (50–99 bps) under these conditions carries the same urgency as the CRITICAL threshold (100+ bps) under normal conditions.
 
 This escalation rule does not apply in the downward direction — Extreme Fear does not suppress signals. It raises urgency but never lowers it.
 
@@ -130,8 +130,8 @@ DAI at $0.9900 = 100 bps
 
 0-19 bps = STABLE — Normal variance, no action
 20-49 bps = WATCH — Monitor closely
-50-99 bps = HEDGE — Reduce exposure
-100+ bps = EXIT — Rotate immediately
+50-99 bps = ELEVATED — Deviation at this level has historically preceded further divergence
+100+ bps = CRITICAL — Deviation at this level is consistent with confirmed depeg events
 
 ### Step 4: Confirm via PegCheck API
 
@@ -166,13 +166,13 @@ There is no rolled-up `overall_risk` field. Derive the aggregate risk level by t
 |---|---|---|
 | LOW | Any | No change — standard signal applies |
 | MEDIUM | STABLE / WATCH | No change |
-| MEDIUM | HEDGE | Elevate to HEDGE (HIGH PRIORITY) — act promptly, do not wait for escalation |
-| MEDIUM | EXIT | No change — EXIT already maximum urgency |
-| HIGH | STABLE / WATCH | Elevate to WATCH / HEDGE respectively — conditions warrant closer monitoring |
-| HIGH | HEDGE | **CRITICAL** — treat as EXIT level urgency, rotate immediately |
-| HIGH | EXIT | **CRITICAL** — systemic cascade risk, rotate all stablecoin exposure |
+| MEDIUM | ELEVATED | Elevate to ELEVATED (HIGH PRIORITY) — warrants immediate closer monitoring |
+| MEDIUM | CRITICAL | No change — CRITICAL already maximum urgency |
+| HIGH | STABLE / WATCH | Elevate to WATCH / ELEVATED respectively — conditions warrant closer monitoring |
+| HIGH | ELEVATED | **CRITICAL** — consistent with systemic cascade risk |
+| HIGH | CRITICAL | **CRITICAL** — consistent with systemic cascade risk |
 
-**CRITICAL flag definition:** A CRITICAL classification means the depeg signal alone understates the risk. Forced liquidations across Aave, Compound, or MakerDAO can accelerate a depeg faster than the bps ladder captures in real time. CRITICAL signals should be treated as EXIT regardless of the raw bps reading.
+**CRITICAL flag definition:** A CRITICAL classification means the depeg signal alone understates the risk. Forced liquidations across Aave, Compound, or MakerDAO can accelerate a depeg faster than the bps ladder captures in real time. CRITICAL signals indicate severity beyond what the raw bps reading captures.
 
 **Error handling:** If the LiquidLens endpoint is unavailable, note "Liquidation risk data unavailable — signal amplification check skipped" and proceed to Step 5 using the unamplified signal. Do not block output generation on this step.
 
@@ -188,15 +188,13 @@ Signal: WATCH
 Action: MONITOR
 Reasoning: {coin} showing early deviation of {bps}bps. Historical pattern suggests this may self-correct within 1-2 hours. Set alert at 50bps threshold.
 
-HEDGE (50-99 bps):
-Signal: HEDGE
-Action: Reduce {coin} exposure by 30-50%. Rotate partial position to {alternative_stablecoin}.
-Reasoning: {bps}bps deviation confirmed across {source_count} sources. Early depeg pattern detected. Monitor for escalation above 100bps.
+ELEVATED (50-99 bps):
+Signal: ELEVATED
+Description: {bps}bps deviation confirmed across {source_count} sources. Early depeg pattern detected — deviation at this level has historically preceded further divergence. Monitor for escalation above 100bps.
 
-EXIT (100+ bps):
-Signal: EXIT
-Action: Rotate full {coin} position to {alternative_stablecoin} immediately.
-Reasoning: {bps}bps deviation — active depeg event in progress. Historical reference: USDC March 2023 SVB event reached 877bps before recovery. Act before liquidity dries up.
+CRITICAL (100+ bps):
+Signal: CRITICAL
+Description: {bps}bps deviation — active depeg event in progress. Historical reference: USDC March 2023 SVB event reached 877bps before recovery. Deviation at this severity has historically been associated with continued instability and reduced liquidity.
 
 ## Output Format
 
@@ -208,9 +206,9 @@ Stablecoin Status table with columns: Coin, Price, Deviation, Signal, Action
 
 Priority Alert showing the highest risk coin, its signal, and recommended action
 
-Fear & Greed Index showing the current score, classification, and any signal escalation applied (e.g. "72 — Greed | No escalation" or "81 — Extreme Greed | HEDGE signals escalated to EXIT urgency")
+Fear & Greed Index showing the current score, classification, and any signal escalation applied (e.g. "72 — Greed | No escalation" or "81 — Extreme Greed | ELEVATED signals escalated to CRITICAL urgency")
 
-Liquidation Risk showing the derived aggregate risk level, per-protocol breakdown from /api/data, and any CRITICAL flag applied (e.g. "HIGH — Aave: High, Compound: Medium, MakerDAO: High | FRAX HEDGE → CRITICAL")
+Liquidation Risk showing the derived aggregate risk level, per-protocol breakdown from /api/data, and any CRITICAL flag applied (e.g. "HIGH — Aave: High, Compound: Medium, MakerDAO: High | FRAX ELEVATED → CRITICAL")
 
 Confidence showing sources confirmed out of 3 (CMC + Chainlink + CoinGecko) and PegCheck confidence score
 
@@ -242,7 +240,7 @@ Statistics derived from the production PegCheck database.
 |---|---|
 | STABLE | 95.1% |
 | WATCH | 0.47% |
-| HEDGE / EXIT | 4.49% |
+| ELEVATED / CRITICAL | 4.49% |
 
 ### False Positive Rate
 
@@ -268,22 +266,22 @@ On March 10, 2023, Silicon Valley Bank (SVB) was shut down by regulators. Circle
 
 ### Timeline and Signal Progression
 
-| Date & Time (UTC) | USDC Price | Deviation | Signal | Recommended Action |
+| Date & Time (UTC) | USDC Price | Deviation | Signal | Signal Context |
 |---|---|---|---|---|
 | Mar 10 18:00 | $0.9982 | 18 bps | STABLE | HOLD — within normal variance |
 | Mar 10 21:00 | $0.9961 | 39 bps | WATCH | MONITOR — set alert at 50 bps |
-| Mar 11 01:00 | $0.9903 | 97 bps | HEDGE | Reduce USDC 30–50%, rotate to USDT |
-| Mar 11 06:00 | $0.9877 | 123 bps | EXIT | Rotate full position to USDT immediately |
-| Mar 11 12:00 | $0.9123 | 877 bps | EXIT | Full depeg in progress — USDT only |
+| Mar 11 01:00 | $0.9903 | 97 bps | ELEVATED | USDC crossed the ELEVATED threshold (50 bps) |
+| Mar 11 06:00 | $0.9877 | 123 bps | CRITICAL | USDC crossed the CRITICAL threshold (100 bps) |
+| Mar 11 12:00 | $0.9123 | 877 bps | CRITICAL | Full depeg in progress — 877 bps deviation |
 | Mar 13 17:00 | $0.9991 | 9 bps | STABLE | Peg restored after Federal Reserve backstop confirmed |
 
 ### Signal Narrative
 
 **WATCH fired ~Mar 10 21:00** — deviation crossed 20 bps as market absorbed news of SVB closure. At this stage the depeg was not confirmed; the signal correctly flagged early risk without triggering a premature full exit.
 
-**HEDGE fired ~Mar 11 01:00** — deviation crossed 50 bps and was confirmed across CMC, Chainlink, and CoinGecko sources (PegCheck confidence: HIGH). The recommended action was a 30–50% rotation into USDT. This was the last low-friction exit window before liquidity on DEX pairs began thinning.
+**ELEVATED fired ~Mar 11 01:00** — deviation crossed 50 bps and was confirmed across CMC, Chainlink, and CoinGecko sources (PegCheck confidence: HIGH). This was the last low-friction window before liquidity on DEX pairs began thinning.
 
-**EXIT fired ~Mar 11 06:00** — deviation crossed 100 bps. Full rotation recommended. USDT was trading at $1.001–$1.003 at this point, absorbing demand as a flight-to-safety destination. Users who acted here avoided the worst of the depeg.
+**CRITICAL fired ~Mar 11 06:00** — deviation crossed 100 bps. USDT was trading at $1.001–$1.003 at this point, absorbing demand as a flight-to-safety destination. Users who exited at this point avoided the worst of the depeg.
 
 **Peak depeg ~Mar 11 12:00** — USDC hit $0.9123 (877 bps). Coinbase and Binance temporarily suspended USDC/USD conversions. Users still holding USDC experienced a ~9% paper loss on their stablecoin position.
 
@@ -293,39 +291,39 @@ On March 10, 2023, Silicon Valley Bank (SVB) was shut down by regulators. Circle
 
 | Approach | Action Taken | Result |
 |---|---|---|
-| Followed DepegGuard | Rotated to USDT at HEDGE signal (~$0.9903) | Avoided ~7.8% loss; re-entered USDC at $0.9991 after recovery |
+| Followed DepegGuard | USDC crossed the ELEVATED threshold at ~$0.9903 | Avoided ~7.8% loss; re-entered USDC at $0.9991 after recovery |
 | Ignored signals | Held USDC through peak depeg | Held through $0.9123 trough; recovered fully by Mar 13 but with liquidity risk and stress |
 | Panic-sold at peak | Sold USDC at ~$0.91–$0.93 on secondary markets | Realised 7–9% loss permanently |
 
-The DepegGuard approach did not require predicting the SVB collapse — it simply responded to price deviation as it appeared, rotating at the first confirmed HEDGE signal and avoiding the worst drawdown window entirely.
+The DepegGuard approach did not require predicting the SVB collapse — it simply responded to price deviation as it appeared. The ELEVATED signal fired at the first confirmed threshold breach, before the worst of the drawdown.
 
 ### PegCheck Confirmation
 
-PegCheck historical data confirms this signal pattern. The HEDGE threshold (50 bps) was crossed at approximately 01:00 UTC on March 11, with all three sources (CMC, Chainlink, CoinGecko) in agreement — PegCheck confidence: HIGH. This is the signal reference used in the EXIT reasoning template: *"Historical reference: USDC March 2023 SVB event reached 877bps before recovery."*
+PegCheck historical data confirms this signal pattern. The ELEVATED threshold (50 bps) was crossed at approximately 01:00 UTC on March 11, with all three sources (CMC, Chainlink, CoinGecko) in agreement — PegCheck confidence: HIGH. This is the signal reference used in the CRITICAL description: *"Historical reference: USDC March 2023 SVB event reached 877bps before recovery."*
 
 ## Backtest: UST Terra Collapse May 2022
 
-On May 7, 2022, large coordinated withdrawals from Anchor Protocol (~$2B in 72 hours) began destabilising UST, an algorithmic stablecoin backed not by cash reserves but by a mint/burn relationship with LUNA. What followed was a death spiral that destroyed ~$40B in value within five days — the largest stablecoin failure in history, and a case where following the EXIT signal was the difference between full capital preservation and near-total loss.
+On May 7, 2022, large coordinated withdrawals from Anchor Protocol (~$2B in 72 hours) began destabilising UST, an algorithmic stablecoin backed not by cash reserves but by a mint/burn relationship with LUNA. What followed was a death spiral that destroyed ~$40B in value within five days — the largest stablecoin failure in history, and a case where acting at the CRITICAL threshold was the difference between full capital preservation and near-total loss.
 
 ### Timeline and Signal Progression
 
-| Date & Time (UTC) | UST Price | Deviation | Signal | Recommended Action |
+| Date & Time (UTC) | UST Price | Deviation | Signal | Signal Context |
 |---|---|---|---|---|
 | May 7 18:00 | $0.9975 | 25 bps | WATCH | MONITOR — early deviation, set alert at 50 bps |
-| May 8 06:00 | $0.9920 | 80 bps | HEDGE | Reduce UST 30–50%, rotate to USDC or USDT |
-| May 8 18:00 | $0.9850 | 150 bps | EXIT | Rotate full position immediately — do not wait |
-| May 9 12:00 | $0.6100 | 3,900 bps | EXIT | Deep depeg confirmed — death spiral in progress |
-| May 10 06:00 | $0.3500 | 6,500 bps | EXIT | LUNA hyperinflation accelerating, peg unrecoverable |
-| May 12 00:00 | $0.1100 | 8,900 bps | EXIT | Terminal collapse — UST trading as distressed asset |
-| May 2023+ | ~$0.0200 | ~9,800 bps | EXIT | No recovery. UST effectively worthless. |
+| May 8 06:00 | $0.9920 | 80 bps | ELEVATED | UST crossed the ELEVATED threshold (50 bps) |
+| May 8 18:00 | $0.9850 | 150 bps | CRITICAL | UST crossed the CRITICAL threshold (100 bps) |
+| May 9 12:00 | $0.6100 | 3,900 bps | CRITICAL | Deep depeg confirmed — death spiral in progress |
+| May 10 06:00 | $0.3500 | 6,500 bps | CRITICAL | LUNA hyperinflation accelerating, peg unrecoverable |
+| May 12 00:00 | $0.1100 | 8,900 bps | CRITICAL | Terminal collapse — UST trading as distressed asset |
+| May 2023+ | ~$0.0200 | ~9,800 bps | CRITICAL | No recovery. UST effectively worthless. |
 
 ### Signal Narrative
 
 **WATCH fired ~May 7 18:00** — deviation crossed 20 bps as Anchor outflows accelerated. The signal was early and subtle; many participants dismissed it as routine volatility. This was the widest exit window.
 
-**HEDGE fired ~May 8 06:00** — deviation crossed 50 bps, confirmed across multiple sources (PegCheck confidence: HIGH). The recommended 30–50% rotation into USDC/USDT was still executable with minimal slippage at this stage. On-chain data shows large wallets began exiting UST/LUNA at this exact window.
+**ELEVATED fired ~May 8 06:00** — deviation crossed 50 bps, confirmed across multiple sources (PegCheck confidence: HIGH). UST was still near par at this stage, with minimal slippage on most venues. On-chain data shows large wallets began exiting UST/LUNA at this exact window.
 
-**EXIT fired ~May 8 18:00** — deviation crossed 100 bps. Full rotation recommended. This was the last point at which UST could be exited near par on most centralised exchanges. Binance briefly suspended UST/USDT trading during this window; users on DEXs faced widening spreads.
+**CRITICAL fired ~May 8 18:00** — deviation crossed 100 bps. This was the last point at which UST could be exited near par on most centralised exchanges. Binance briefly suspended UST/USDT trading during this window; users on DEXs faced widening spreads.
 
 **Death spiral ~May 9–10** — the LUNA mint/burn mechanism kicked in at scale. To restore the UST peg, the protocol minted LUNA, flooding supply, collapsing LUNA's price, destroying confidence, and driving further UST selling. Each cycle worsened the next. No external reserve backstop existed.
 
@@ -337,18 +335,18 @@ On May 7, 2022, large coordinated withdrawals from Anchor Protocol (~$2B in 72 h
 
 | Approach | Action Taken | Result |
 |---|---|---|
-| Followed DepegGuard | Rotated to USDC/USDT at HEDGE signal (~$0.9920) | Capital preserved in full; avoided collapse entirely |
-| Waited for confirmation | Held through EXIT signal, exited at ~$0.85 | ~15% loss, but capital largely preserved |
+| Followed DepegGuard | UST crossed the ELEVATED threshold at ~$0.9920 | Capital preserved in full; avoided collapse entirely |
+| Waited for confirmation | Held through the CRITICAL signal level, exited at ~$0.85 | ~15% loss, but capital largely preserved |
 | Held through depeg | Believed recovery was coming (algorithmic peg would restore) | Held through $0.11 trough and beyond; ~90%+ loss realised |
 | Bought the dip | Re-entered UST at $0.50–$0.70 expecting recovery | Total loss — no recovery ever came |
 
 ### Critical Difference vs SVB
 
-The SVB event was a liquidity crisis with real reserves behind USDC — recovery was possible once the reserves were confirmed accessible. UST had no real reserves. When the algorithmic mechanism broke, there was nothing to restore the peg. DepegGuard does not distinguish between recoverable and unrecoverable depegs at signal time — nor should it. The EXIT signal fires on deviation, not on underlying cause. The correct action is identical in both cases: rotate immediately. The outcome diverged because of what the stablecoin was, not because the signal was different.
+The SVB event was a liquidity crisis with real reserves behind USDC — recovery was possible once the reserves were confirmed accessible. UST had no real reserves. When the algorithmic mechanism broke, there was nothing to restore the peg. DepegGuard does not distinguish between recoverable and unrecoverable depegs at signal time — nor should it. The CRITICAL signal fires on deviation, not on underlying cause. The outcome diverged because of what the stablecoin was, not because the signal was different.
 
 ### PegCheck Confirmation
 
-PegCheck historical data confirms all three signal thresholds were breached sequentially across CMC, Chainlink, and CoinGecko sources. The HEDGE threshold (50 bps) was confirmed at approximately 06:00 UTC on May 8 with PegCheck confidence: HIGH. The EXIT threshold (100 bps) was confirmed by 18:00 UTC on May 8 — approximately 18 hours before UST lost 30% of its value. Users who acted on the EXIT signal had full exit liquidity. Users who waited 24 hours did not.
+PegCheck historical data confirms all three signal thresholds were breached sequentially across CMC, Chainlink, and CoinGecko sources. The ELEVATED threshold (50 bps) was confirmed at approximately 06:00 UTC on May 8 with PegCheck confidence: HIGH. The CRITICAL threshold (100 bps) was confirmed by 18:00 UTC on May 8 — approximately 18 hours before UST lost 30% of its value. Users who exited at the ELEVATED threshold preserved full liquidity. Users who waited 24 hours did not.
 
 ## Backtest: USDT Black Thursday March 2020
 
@@ -361,19 +359,19 @@ Unlike UST or USDC/SVB, USDT holders were not at risk of loss. But the depeg sig
 | Date & Time (UTC) | USDT Price | Deviation | Signal | Recommended Action |
 |---|---|---|---|---|
 | Mar 12 08:00 | $1.0028 | 28 bps | WATCH | MONITOR — premium forming, broader market stress detected |
-| Mar 12 14:00 | $1.0094 | 94 bps | HEDGE | Note premium — avoid buying USDT at cost; holders consider partial rotation to USDC |
-| Mar 12 20:00 | $1.0180 | 180 bps | EXIT | Active upward depeg — do not buy USDT; holders can realise premium by rotating to USDC |
-| Mar 13 04:00 | $1.0241 | 241 bps | EXIT | Peak premium — USDT trading at sustained 241 bps above par on aggregate |
-| Mar 13 14:00 | $1.0097 | 97 bps | HEDGE | Premium subsiding as markets partially recover |
+| Mar 12 14:00 | $1.0094 | 94 bps | ELEVATED | Demand surge pushing USDT above par; premium forming ahead of main crash wave |
+| Mar 12 20:00 | $1.0180 | 180 bps | CRITICAL | Active upward depeg — USDT trading well above par; buying at this level carries mean-reversion risk |
+| Mar 13 04:00 | $1.0241 | 241 bps | CRITICAL | Peak premium — USDT trading at sustained 241 bps above par on aggregate |
+| Mar 13 14:00 | $1.0097 | 97 bps | ELEVATED | Premium subsiding as markets partially recover |
 | Mar 14 06:00 | $1.0014 | 14 bps | STABLE | Peg restored — USDT back within normal variance |
 
 ### Signal Narrative
 
 **WATCH fired ~Mar 12 08:00** — USDT began drifting above $1.00 as early selling pressure hit crypto markets. The signal correctly flagged abnormal conditions before the main crash wave arrived.
 
-**HEDGE fired ~Mar 12 14:00** — as BTC began its accelerated sell-off, stablecoin demand surged. USDT crossed 50 bps above par. The recommended action for an upward depeg differs from a downward one: existing USDT holders had no loss risk, but anyone trying to buy USDT was paying above par. The signal served as a warning to avoid entering USDT at a premium.
+**ELEVATED fired ~Mar 12 14:00** — as BTC began its accelerated sell-off, stablecoin demand surged. USDT crossed 50 bps above par. For an upward depeg, existing holders faced no loss risk, but anyone buying USDT was paying above par. The signal flagged that the premium had reached a level warranting attention.
 
-**EXIT fired ~Mar 12 20:00** — deviation crossed 100 bps during peak panic. On certain exchanges USDT/USD spot pairs were printing $1.04–$1.06. Aggregate CMC pricing smoothed this to ~$1.018. USDT holders who rotated to USDC at this point locked in a ~1.8% gain on their stablecoin position. Buyers entering USDT at this price faced immediate mean-reversion losses once markets stabilised.
+**CRITICAL fired ~Mar 12 20:00** — deviation crossed 100 bps during peak panic. On certain exchanges USDT/USD spot pairs were printing $1.04–$1.06. Aggregate CMC pricing smoothed this to ~$1.018. USDT holders who rotated to USDC at this point locked in a ~1.8% gain on their stablecoin position. Buyers entering USDT at this price faced immediate mean-reversion losses once markets stabilised.
 
 **Peak premium ~Mar 13 04:00** — USDT reached 241 bps above par, the highest sustained upward deviation recorded for a major fiat-backed stablecoin outside of exchange-specific anomalies. DAI simultaneously spiked above $1.10 due to MakerDAO liquidation failures during the same crash, validating the value of monitoring multiple stablecoins in parallel.
 
@@ -383,7 +381,7 @@ Unlike UST or USDC/SVB, USDT holders were not at risk of loss. But the depeg sig
 
 | Approach | Action Taken | Result |
 |---|---|---|
-| Followed DepegGuard (holder) | Rotated USDT → USDC at EXIT signal (~$1.018), re-entered USDT at ~$1.001 | ~1.7% gain on stablecoin-to-stablecoin rotation |
+| Followed DepegGuard (holder) | USDT crossed the CRITICAL threshold at ~$1.018; holders who rotated to USDC and re-entered at ~$1.001 realised ~1.7% gain | ~1.7% gain on stablecoin-to-stablecoin rotation |
 | Ignored signals (holder) | Held USDT throughout | No loss — USDT fully recovered; missed rotation gain |
 | Bought USDT at peak | Entered USDT at $1.02–$1.04 expecting safety | Immediate ~2–4% paper loss as premium compressed; recovered at peg |
 | Held DAI | No rotation — DAI spiked to ~$1.10+ due to MakerDAO liquidation crisis | Significant premium paid if buying; severe slippage risk |
@@ -400,7 +398,7 @@ DepegGuard's absolute deviation formula (`abs(price - 1.0000) × 10000`) catches
 
 ### PegCheck Confirmation
 
-PegCheck historical data confirms the upward deviation signal pattern across Chainlink and CoinGecko sources. The WATCH threshold (20 bps) was crossed on the morning of March 12 with PegCheck confidence: HIGH. The EXIT threshold (100 bps) was confirmed by ~20:00 UTC on March 12 across all three sources — several hours before the 241 bps peak. The signal fired early enough to act before the premium reached its widest point.
+PegCheck historical data confirms the upward deviation signal pattern across Chainlink and CoinGecko sources. The WATCH threshold (20 bps) was crossed on the morning of March 12 with PegCheck confidence: HIGH. The CRITICAL threshold (100 bps) was confirmed by ~20:00 UTC on March 12 across all three sources — several hours before the 241 bps peak. The signal fired early enough to observe the premium before it reached its widest point.
 
 ## Systemic Risk: Correlation Alert
 
@@ -436,9 +434,9 @@ On June 8, 2026, three stablecoins triggered simultaneously:
 
 | Coin | Price | Deviation | Signal |
 |---|---|---|---|
-| FRAX | ~$0.9909 | 91 bps | HEDGE |
-| DOLA | ~$0.9936 | 64 bps | HEDGE |
-| alUSD | ~$0.9694 | 306 bps | EXIT |
+| FRAX | ~$0.9909 | 91 bps | ELEVATED |
+| DOLA | ~$0.9936 | 64 bps | ELEVATED |
+| alUSD | ~$0.9694 | 306 bps | CRITICAL |
 
 Correlation score: **3** — Market stress level: **ELEVATED**
 
@@ -452,7 +450,7 @@ The March 2023 SVB collapse is the clearest historical example of stablecoin cor
 - **DAI** depegged below $0.9000 — DAI's collateral pool included significant USDC exposure via PSM (Peg Stability Module), creating a direct transmission channel
 - **FRAX** lost its peg as FRAX v2 held USDC as part-collateral
 
-All three coins fired EXIT signals within hours of each other. A user monitoring only USDC would have seen one depeg. A user running the Correlation Alert would have seen three EXIT-level coins and a HIGH systemic stress classification — a materially different read on the severity of the event.
+All three coins reached CRITICAL signal levels within hours of each other. A user monitoring only USDC would have seen one depeg. A user running the Correlation Alert would have seen three CRITICAL-level coins and a HIGH systemic stress classification — a materially different read on the severity of the event.
 
 The correct response to a HIGH stress classification is not just to rotate out of the flagged coins but to question whether *any* stablecoin in the monitored set is safe, and to consider rotating into T-bill-backed or exchange-custody alternatives until the correlation breaks.
 
@@ -477,7 +475,7 @@ Example output for the June 8, 2026 event:
 --- Systemic Risk Assessment ---
 Correlation Score: 3 coins at WATCH or above
 Market Stress Level: ELEVATED
-Coins flagged: FRAX (HEDGE, 91 bps), DOLA (HEDGE, 64 bps), alUSD (EXIT, 306 bps)
+Coins flagged: FRAX (ELEVATED, 91 bps), DOLA (ELEVATED, 64 bps), alUSD (CRITICAL, 306 bps)
 Assessment: Cross-coin correlation detected. Broader stress likely. Review all stablecoin exposure.
 ```
 
