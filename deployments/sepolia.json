@@ -1,0 +1,19 @@
+{
+  "network": "sepolia",
+  "deployedAt": "2026-09-10T13:32:12.132Z",
+  "deployer": "0xcBB1AD132bB51Cc41210309d6e3bd45598eebb5e",
+  "contracts": {
+    "ExposureRegistry": "0xC60Ceb4faB3B63495534B2a9A5EB3F6C3f668789",
+    "DepegEventRegistry": "0x1A28535abc3Ad99A42CaF5439e8219Cc450AbfF6",
+    "ProtectionHoldLedger": "0x55fc74c807dd5aC468Cf2e9B5c26Abb9b1149945",
+    "StableGuardVault": "0xAa940C87f3D3251fD297894b5cef7dC7e71b3665",
+    "StableGuardCREReceiver": "0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b"
+  },
+  "params": {
+    "asset": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+    "keystoneForwarder": "0xF8344CFd5c43616a4366C34E3EEE75af79a74482",
+    "chainSelector": "16015286601757825753",
+    "vaultName": "StableGuard USDC Vault",
+    "vaultSymbol": "sgUSDC"
+  }
+}
