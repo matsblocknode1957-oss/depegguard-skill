@@ -2,6 +2,21 @@
 
 [![Live API](https://img.shields.io/badge/Live%20API-green?style=flat-square)](https://pegcheck.uk/api/depeg-status?coin=USDC) [![Agent ID 1312](https://img.shields.io/badge/Agent%20ID%201312-blue?style=flat-square)](https://testnet.bscscan.com/token/0x8004a818bfb912233c491871b3d84c89a494bd9e?a=1312) [![BNB Chain](https://img.shields.io/badge/BNB%20Chain-yellow?style=flat-square)](https://www.bnbchain.org) [![CMC Agent Hub](https://img.shields.io/badge/CMC%20Agent%20Hub-blue?style=flat-square)](https://coinmarketcap.com)
 
+## Repository Overview
+
+This repo contains two related but distinct components:
+
+- **depegguard-strategy** (`skills/depegguard-strategy/`) — a CMC Agent Hub
+  Strategy Skill that detects depeg signals via CoinMarketCap data. This is
+  the primary hackathon submission.
+- **stableguard-cre** (`stableguard-cre/`) — a newer on-chain protection
+  system built on Chainlink CRE, using ERC-4626 vaults with automated
+  dual-mode freeze logic (DEPOSIT_ONLY or FULL_FREEZE) triggered by Chainlink
+  price feed deviations. Deployed to Ethereum Sepolia and Arbitrum Sepolia.
+
+The skill is the signal layer; stableguard-cre is the on-chain enforcement
+layer. Both live in this repo.
+
 ## Why This Exists
 
 In May 2022 the UST/Terra collapse wiped out $40 billion in days. There was no early warning system, no automated protection, no structured signal telling people to exit before liquidity dried up. DepegGuard was built because that shouldn't happen again. It turns depeg signals into actionable strategy — before liquidity dries up.
@@ -16,7 +31,7 @@ Submitted to multiple hackathons: Pharos (Skill-to-Agent Dual Cascade), BNB HACK
 
 - Monitors 7 major stablecoins in real time via CMC Agent Hub
 - Calculates deviation from $1.00 peg in basis points
-- Classifies signals: STABLE / WATCH / HEDGE / EXIT
+- Classifies signals: STABLE / WATCH / ELEVATED / CRITICAL
 - Confirms signals via PegCheck multi-source data (Chainlink + CoinGecko + CMC)
 - Outputs a structured trading strategy with reasoning and historical context
 
@@ -26,25 +41,25 @@ Submitted to multiple hackathons: Pharos (Skill-to-Agent Dual Cascade), BNB HACK
 |-----------|--------|--------|
 | 0-19 bps  | STABLE | HOLD |
 | 20-49 bps | WATCH  | MONITOR |
-| 50-99 bps | HEDGE  | Reduce exposure 30-50% |
-| 100+ bps  | EXIT   | Rotate immediately |
+| 50-99 bps | ELEVATED | Deviation at this level has historically preceded further divergence |
+| 100+ bps  | CRITICAL | Sustained deviation at this level has coincided with liquidity contraction in prior events |
 
 ## Live Example Output
 
 ```
 Generated: 2026-06-09 10:06 UTC
 
-FRAX — HEDGE (72 bps)
-Action: Reduce FRAX exposure by 30–50%. Rotate to USDT or USDC.
+FRAX — ELEVATED (72 bps)
+Risk: Deviation at this level has historically preceded further divergence. Prior FRAX events at similar readings extended for multiple hours before self-correcting.
 
 Fear & Greed: 15 — Extreme Fear
-Signal adjustment: WATCH signals treated as HEDGE urgency.
+Signal adjustment: WATCH signals treated as ELEVATED urgency.
 
 Liquidation Risk (LiquidLens /api/data):
 Aave v3: Medium — $324M at risk
 Compound v3: Low — $11M at risk  
 MakerDAO: Medium — $191M at risk
-Aggregate: MEDIUM — FRAX HEDGE elevated to HIGH PRIORITY
+Aggregate: MEDIUM — FRAX ELEVATED to HIGH PRIORITY
 
 Systemic Risk: LOW — isolated signal
 ETH: $1,669 (Chainlink) — collateral values compressed
@@ -62,9 +77,9 @@ Analysis of **260,950 price snapshots** stored in the `price_history` table acro
 |------|-----------|----------|------------|
 | STABLE | < 20 bps | ~248,000 | ~95.1% |
 | WATCH | 20–49 bps | ~1,223 | ~0.47% |
-| HEDGE / EXIT | ≥ 50 bps | 11,727 | 4.49% |
+| ELEVATED / CRITICAL | ≥ 50 bps | 11,727 | 4.49% |
 
-### Depeg Events (HEDGE threshold ≥ 50 bps)
+### Depeg Events (ELEVATED threshold ≥ 50 bps)
 
 37 distinct depeg events were identified across 6 coins (gap-clustered: readings >3 hours apart = separate event).
 
@@ -84,7 +99,7 @@ Analysis of **260,950 price snapshots** stored in the `price_history` table acro
 
 Every confirmed reading already passes a 5-to-6 source median filter (CoinGecko, Coinbase, Binance.US, Kraken, DefiLlama, and on-chain Chainlink feeds for USDT/USDC/USDS/TUSD), so each row in `price_history` is itself a multi-source consensus price before event confirmation is applied.
 
-> Major blue-chip stablecoins (USDT, USDC, USDS, PYUSD, FDUSD) produced **zero HEDGE-level events** over the entire observed history, consistent with their strong collateralisation and market liquidity.
+> Major blue-chip stablecoins (USDT, USDC, USDS, PYUSD, FDUSD) produced **zero ELEVATED-level events** over the entire observed history, consistent with their strong collateralisation and market liquidity.
 
 **Methodology:**
 - `deviation_bps` = `(price − peg) / peg × 10,000` (signed; negative = below peg). EURC uses live EUR/USD as its peg reference.
