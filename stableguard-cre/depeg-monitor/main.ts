@@ -53,7 +53,7 @@ type CoinResult = {
   address: `0x${string}`
   price18: bigint
   deviationBps: bigint
-  signalLevel: number      // 0=STABLE 1=WATCH 2=HEDGE 3=EXIT
+  signalLevel: number      // 0=STABLE 1=WATCH 2=ELEVATED 3=CRITICAL
   fullReport: `0x${string}`
 }
 
@@ -113,8 +113,8 @@ function calcDeviationBps(price18: bigint): bigint {
 function classifySignal(bps: bigint): number {
   if (bps < 20n)  return 0  // STABLE
   if (bps < 50n)  return 1  // WATCH
-  if (bps < 100n) return 2  // HEDGE
-  return 3                   // EXIT
+  if (bps < 100n) return 2  // ELEVATED
+  return 3                   // CRITICAL
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ const onCronTrigger = (runtime: Runtime<Config>): string => {
     const signal  = classifySignal(bps)
 
     runtime.log(
-      `[DS] ${coin.symbol}: ${bps}bps → ${["STABLE", "WATCH", "HEDGE", "EXIT"][signal]}`
+      `[DS] ${coin.symbol}: ${bps}bps → ${["STABLE", "WATCH", "ELEVATED", "CRITICAL"][signal]}`
     )
 
     return {
@@ -215,9 +215,9 @@ const onCronTrigger = (runtime: Runtime<Config>): string => {
     }
   })
 
-  // ── Step 4: Cooldown filter — HEDGE+ coins only ──
+  // ── Step 4: Cooldown filter — ELEVATED+ coins only ──
   // lastTriggered is enforced onchain in StableGuardCREReceiver.onReport();
-  // we forward all HEDGE+ coins and let the receiver apply the cooldown guard.
+  // we forward all ELEVATED+ coins and let the receiver apply the cooldown guard.
   const triggerable = results.filter(r => r.signalLevel >= 2)
 
   runtime.log(`cooldownSec=${cooldownSec} triggerable=${triggerable.length}`)
@@ -269,7 +269,7 @@ const onCronTrigger = (runtime: Runtime<Config>): string => {
     coins: results.map(r => ({
       symbol:       r.symbol,
       deviationBps: r.deviationBps.toString(),
-      signal:       ["STABLE", "WATCH", "HEDGE", "EXIT"][r.signalLevel],
+      signal:       ["STABLE", "WATCH", "ELEVATED", "CRITICAL"][r.signalLevel],
     })),
   })
 }
