@@ -102,7 +102,7 @@ function buildDSSignature(
   // HMAC-SHA256 over: METHOD + PATH + QUERY + CLIENT_ID + TIMESTAMP
   // See: https://docs.chain.link/data-streams/reference/authentication
   const message = `${method}${path}${query}${clientId}${ts}`
-  return toHex(hmacSha256(hexToBytes(clientSecret), encodeUtf8(message)))
+  return toHex(hmacSha256(encodeUtf8(clientSecret), encodeUtf8(message)))
 }
 
 function calcDeviationBps(price18: bigint): bigint {
