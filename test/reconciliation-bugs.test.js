@@ -61,11 +61,13 @@ async function deployEventRegistry(admin) {
     );
 }
 
-// ── Bug 1: acquire() reverts → FAILED destinationCallback ────────────────────
+// ── Bug 1: acquire() reverts → vault left unpaused, FAILED destinationCallback ─
 //
-// The old code used `dcState = pauseResult ? COMPLETE : FAILED`, which reported
-// COMPLETE even when holdLedger.acquire() had thrown.  The fix requires both
-// pauseResult AND holdAcquired before sending COMPLETE.
+// Original fix: `dcState = pauseResult ? COMPLETE : FAILED` was changed to require
+// both pauseResult AND holdAcquired.  Current fix goes further: acquire() now runs
+// before pause(), so a failing acquire() never triggers a vault freeze at all.
+// This eliminates the orphaned-pause state (vault frozen, no hold, no active event)
+// that would cause the next report to attempt a double-pause on a real vault.
 
 describe("Bug-1: acquire() revert produces FAILED destinationCallback", function () {
     let receiver, registry, eventRegistry, mockLedger, vault;
@@ -107,7 +109,7 @@ describe("Bug-1: acquire() revert produces FAILED destinationCallback", function
         );
     });
 
-    it("vault pauses but event reaches FAILED when holdLedger.acquire() reverts", async function () {
+    it("vault stays unpaused and event reaches FAILED when holdLedger.acquire() reverts", async function () {
         const report = encodeReport([coinA.address], [2], 2);
         const tx = await receiver.connect(forwarder).onReport("0x", report);
         const receipt = await tx.wait();
@@ -118,8 +120,8 @@ describe("Bug-1: acquire() revert produces FAILED destinationCallback", function
             .find(e => e && e.name === "EventCreated");
         const eventId = evCreated.args.eventId;
 
-        // pause() preceded acquire(), so the vault is physically paused
-        expect(await vault.paused()).to.equal(true);
+        // acquire() runs before pause() — vault is NOT paused when acquire() fails
+        expect(await vault.paused()).to.equal(false);
 
         // destinationCallback received FAILED → 1 dest, all FAILED → terminal FAILED
         const ev = await eventRegistry.getDepegEvent(eventId);
@@ -279,5 +281,74 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
             receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]))
         ).to.not.be.reverted;
         expect(await flakyVault.paused()).to.equal(false);
+    });
+});
+
+// ── Bug-1 double-pause regression ─────────────────────────────────────────────
+//
+// Before the acquire()-first fix, a failing acquire() left the vault paused with
+// no hold on record (orphaned freeze).  The next report for the same coin would
+// find activeHoldCount==0 and paused()==true, skip the alreadyFrozen short-circuit,
+// and call pause() again — reverting on any vault that guards double-pause (OZ
+// Pausable throws EnforcedPause).
+//
+// With acquire()-first: no hold → no pause → vault stays unpaused → the second
+// report starts from clean state.  This test uses MockVaultRevertDoublePause
+// (reverts on double-pause) to exercise the exact scenario the earlier Bug-1 test
+// did not cover.
+
+describe("Bug-1 double-pause regression: acquire() fail leaves vault unpaused; second report does not double-pause", function () {
+    let receiver, eventRegistry, registry, mockLedger, vault;
+    let forwarder, admin, coinA;
+
+    beforeEach(async function () {
+        [forwarder, admin, coinA] = await ethers.getSigners();
+        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 1000n;
+
+        const VaultFactory = await ethers.getContractFactory("MockVaultRevertDoublePause");
+        vault = await VaultFactory.deploy();
+
+        const LedgerFactory = await ethers.getContractFactory("MockHoldLedgerRevertAcquire");
+        mockLedger = await LedgerFactory.deploy();
+
+        const ExposureRegistry = await ethers.getContractFactory("ExposureRegistry");
+        registry = await ExposureRegistry.deploy(admin.address);
+
+        eventRegistry = await deployEventRegistry(admin);
+        await eventRegistry.connect(admin).setHoldLedger(await mockLedger.getAddress());
+
+        const ReceiverFactory = await ethers.getContractFactory("StableGuardCREReceiver");
+        receiver = await ReceiverFactory.deploy(
+            forwarder.address,
+            await registry.getAddress(),
+            await eventRegistry.getAddress(),
+            await vault.getAddress(),
+            LOCAL_CHAIN_SELECTOR,
+            await mockLedger.getAddress(),
+            MAX_REPORT_AGE
+        );
+
+        await eventRegistry.connect(admin).transferController(await receiver.getAddress());
+        await registry.connect(admin).registerExposure(
+            await vault.getAddress(), addrToBytes32(coinA.address)
+        );
+    });
+
+    it("vault stays unpaused when acquire() reverts; second report does not trigger double-pause revert", async function () {
+        // First report: acquire() reverts → no pause attempted → vault stays unpaused
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
+        expect(await vault.paused()).to.equal(false,
+            "vault must not be paused after acquire() failure (no orphaned freeze)");
+
+        // Second report: vault is unpaused, so pause() would be a legal first call.
+        // Without the fix vault would be paused here and vault.pause() would throw
+        // AlreadyPaused — soft-caught as VaultPauseFailed, but vault stuck paused forever.
+        // With the fix acquire() fails first so pause() is never called on either report.
+        await expect(
+            receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2))
+        ).to.not.be.reverted;
+
+        expect(await vault.paused()).to.equal(false,
+            "vault must remain unpaused — acquire() always reverts so pause() is never called");
     });
 });

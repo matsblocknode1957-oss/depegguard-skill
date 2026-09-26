@@ -62,8 +62,8 @@ interface IProtectionHoldLedger {
  * Per-coin call sequence in onReport() (each call independently try/caught):
  *   1. eventRegistry.processReport   — advance state machine
  *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
- *   3. vault.pause() or pauseDeposits() — mode-gated; outcome captured in bool
- *   4. holdLedger.acquire()          — record hold identity after successful pause
+ *   3. holdLedger.acquire()          — claim hold; no vault freeze attempted if this fails
+ *   4. vault.pause() or pauseDeposits() — only if acquire succeeded; hold released on freeze failure
  *   5. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
  *
  * Constructor args:
@@ -358,46 +358,60 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
-            // Call 3: freeze vault (full or deposit-only) per the customer's registered mode.
-            // Skip the freeze call if another hold already has the vault in the appropriate
-            // frozen state — check the mode-specific flag so FULL_FREEZE checks paused()
-            // and DEPOSIT_ONLY_FREEZE checks depositsFrozen().
+            // Call 3: acquire hold first — if this fails, no vault freeze is attempted.
+            // Eliminates the orphaned-pause state that arises when acquire() throws after
+            // pause() has already executed: vault frozen, no hold on record, next report
+            // calls pause() again on an already-paused vault.
             IExposureRegistry.FreezeMode freezeMode = exposureRegistry.vaultFreezeMode(vault);
-            bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
-                ? IPausable(vault).paused()
-                : IPausable(vault).depositsFrozen();
-
-            bool pauseResult = false;
-            if (holdLedger.activeHoldCount(vault) > 0 && alreadyFrozen) {
-                pauseResult = true;
-            } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
-                try IPausable(vault).pause() {
-                    pauseResult = true;
-                } catch (bytes memory reason) {
-                    emit VaultPauseFailed(vault, sym, reason);
-                }
-            } else {
-                try IPausable(vault).pauseDeposits() {
-                    pauseResult = true;
-                } catch (bytes memory reason) {
-                    emit VaultPauseFailed(vault, sym, reason);
-                }
-            }
-
-            // Call 4: acquire hold — pass the actual freeze mode so the ledger records
-            // what level this hold requires, enabling downgrade tracking in partial releases.
             bool holdAcquired = false;
-            if (pauseResult) {
-                try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
-                    returns (bytes32 hId)
-                {
-                    _coinHoldId[coin] = hId;
-                    holdAcquired = true;
-                } catch { }
+            bytes32 acquiredHoldId;
+            try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
+                returns (bytes32 hId)
+            {
+                _coinHoldId[coin] = hId;
+                acquiredHoldId    = hId;
+                holdAcquired      = true;
+            } catch { }
+
+            // Call 4: freeze vault — only if hold was acquired.
+            // alreadyFrozen short-circuit uses > 1 (not > 0) because our hold was just
+            // added, so the pre-existing count is activeHoldCount - 1.
+            // On freeze failure, release the hold to prevent a dangling hold with no
+            // corresponding freeze.
+            bool pauseResult = false;
+            if (holdAcquired) {
+                bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
+                    ? IPausable(vault).paused()
+                    : IPausable(vault).depositsFrozen();
+
+                if (holdLedger.activeHoldCount(vault) > 1 && alreadyFrozen) {
+                    pauseResult = true;
+                } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
+                    try IPausable(vault).pause() {
+                        pauseResult = true;
+                    } catch (bytes memory reason) {
+                        emit VaultPauseFailed(vault, sym, reason);
+                    }
+                } else {
+                    try IPausable(vault).pauseDeposits() {
+                        pauseResult = true;
+                    } catch (bytes memory reason) {
+                        emit VaultPauseFailed(vault, sym, reason);
+                    }
+                }
+
+                if (!pauseResult) {
+                    try holdLedger.release(acquiredHoldId) { } catch { }
+                    _coinHoldId[coin] = bytes32(0);
+                    holdAcquired      = false;
+                }
             }
 
-            // Call 5: close the destination slot with the honest result
-            IDepegEventRegistry.DestState dcState = (pauseResult && holdAcquired)
+            // Call 5: close the destination slot with the honest result.
+            // Due to the rollback above, holdAcquired is false whenever pauseResult
+            // is false — so this is effectively equivalent to just `holdAcquired`,
+            // but both terms are kept for defensive clarity.
+            IDepegEventRegistry.DestState dcState = (holdAcquired && pauseResult)
                 ? IDepegEventRegistry.DestState.COMPLETE
                 : IDepegEventRegistry.DestState.FAILED;
             try eventRegistry.destinationCallback(eventId, 0, dcState) {
