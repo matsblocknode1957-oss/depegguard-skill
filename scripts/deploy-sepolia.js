@@ -110,6 +110,19 @@ async function main() {
     await (await eventRegistry.transferController(receiverAddr)).wait();
     console.log("  ✓ eventRegistry.transferController(receiver)");
 
+    const REPORTER_ROLE_ID          = await eventRegistry.REPORTER_ROLE();
+    const ACTION_ROLE_ID            = await eventRegistry.ACTION_ROLE();
+    const PAUSE_COORDINATOR_ROLE_ID = await eventRegistry.PAUSE_COORDINATOR_ROLE();
+
+    await (await eventRegistry.revokeRole(REPORTER_ROLE_ID,          deployer.address)).wait();
+    console.log("  ✓ eventRegistry.revokeRole(REPORTER_ROLE, deployer)");
+
+    await (await eventRegistry.revokeRole(ACTION_ROLE_ID,            deployer.address)).wait();
+    console.log("  ✓ eventRegistry.revokeRole(ACTION_ROLE, deployer)");
+
+    await (await eventRegistry.revokeRole(PAUSE_COORDINATOR_ROLE_ID, deployer.address)).wait();
+    console.log("  ✓ eventRegistry.revokeRole(PAUSE_COORDINATOR_ROLE, deployer)");
+
     await (await holdLedger.transferCoordinator(receiverAddr)).wait();
     console.log("  ✓ holdLedger.transferCoordinator(receiver)");
 
