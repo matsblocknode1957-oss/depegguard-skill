@@ -257,6 +257,12 @@ contract StableGuardCREReceiver {
                     } else if (holdLedger.activeHoldCount(vault) == 0) {
                         // Retry path: hold released in a prior cycle but unpause failed.
                         // No holds remain — treat as fully released and attempt unpause.
+                        //
+                        // Safety assumption: PAUSE_COORDINATOR_ROLE is held exclusively by this
+                        // receiver. If a second coordinator independently paused the vault between
+                        // the hold release and this retry, this unpause would silently clear that
+                        // independent pause. Granting PAUSE_COORDINATOR_ROLE to additional addresses
+                        // would reintroduce this risk; keep the role single-holder.
                         holdReleased = true;
                         vaultFullyReleased = true;
                     }

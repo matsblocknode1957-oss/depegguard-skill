@@ -122,6 +122,7 @@ contract DepegEventRegistry {
     /// Cleared on any terminal transition. Set on event creation.
     mapping(bytes32 => bytes32) public activeEventId;
 
+    uint256 private _governanceCount;
     uint256 private _nonce;
 
     // ── Events ────────────────────────────────────────────────────────────────
@@ -160,6 +161,8 @@ contract DepegEventRegistry {
     error HoldIncidentMismatch(bytes32 holdId, bytes32 holdRoot, bytes32 eventRoot);
     error EventAssetMismatch(bytes32 eventId, address expected, address got);
     error NotTerminalContinuable(bytes32 eventId, State state);
+    error UnknownRole(bytes32 role);
+    error WouldRemoveLastGovernance();
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -180,6 +183,7 @@ contract DepegEventRegistry {
         _roles[ACTION_ROLE][_governance]            = true;
         _roles[KEEPER_ROLE][_governance]            = true;
         _roles[PAUSE_COORDINATOR_ROLE][_governance] = true;
+        _governanceCount = 1;
 
         watchThreshold     = _watchThreshold;
         confirmedThreshold = _confirmedThreshold;
@@ -198,12 +202,22 @@ contract DepegEventRegistry {
     function grantRole(bytes32 role, address account) external {
         _requireRole(GOVERNANCE_ROLE);
         if (account == address(0)) revert ZeroAddress();
+        if (role != REPORTER_ROLE &&
+            role != ACTION_ROLE &&
+            role != KEEPER_ROLE &&
+            role != GOVERNANCE_ROLE &&
+            role != PAUSE_COORDINATOR_ROLE) revert UnknownRole(role);
+        if (role == GOVERNANCE_ROLE && !_roles[GOVERNANCE_ROLE][account]) ++_governanceCount;
         _roles[role][account] = true;
         emit RoleGranted(role, account, msg.sender);
     }
 
     function revokeRole(bytes32 role, address account) external {
         _requireRole(GOVERNANCE_ROLE);
+        if (role == GOVERNANCE_ROLE && _roles[GOVERNANCE_ROLE][account]) {
+            if (_governanceCount <= 1) revert WouldRemoveLastGovernance();
+            unchecked { --_governanceCount; }
+        }
         _roles[role][account] = false;
         emit RoleRevoked(role, account, msg.sender);
     }

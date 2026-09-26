@@ -1434,6 +1434,74 @@ describe("DepegEventRegistry", function () {
         });
     });
 
+    // ── Role management guards (Finding 1a + 1b) ──────────────────────────────
+
+    describe("B-06 – grantRole / revokeRole guards", function () {
+
+        it("B-06-a: grantRole reverts UnknownRole for an arbitrary bytes32", async function () {
+            const phantom = ethers.keccak256(ethers.toUtf8Bytes("NOT_A_REAL_ROLE"));
+            await expect(
+                registry.connect(controller).grantRole(phantom, other.address)
+            ).to.be.revertedWithCustomError(registry, "UnknownRole");
+        });
+
+        it("B-06-b: revokeRole reverts WouldRemoveLastGovernance when only one GOVERNANCE_ROLE holder exists", async function () {
+            // controller is the sole GOVERNANCE_ROLE holder after construction
+            const GOVERNANCE_ROLE = await registry.GOVERNANCE_ROLE();
+            await expect(
+                registry.connect(controller).revokeRole(GOVERNANCE_ROLE, controller.address)
+            ).to.be.revertedWithCustomError(registry, "WouldRemoveLastGovernance");
+        });
+
+        it("B-06-c: revoking GOVERNANCE_ROLE succeeds when a second holder exists; subsequent revoke of last holder still blocked", async function () {
+            const GOVERNANCE_ROLE = await registry.GOVERNANCE_ROLE();
+            await registry.connect(controller).grantRole(GOVERNANCE_ROLE, other.address);
+
+            // Two holders: revoking one is fine
+            await expect(
+                registry.connect(controller).revokeRole(GOVERNANCE_ROLE, other.address)
+            ).to.emit(registry, "RoleRevoked");
+
+            // Back to one holder: revoking the last one is blocked
+            await expect(
+                registry.connect(controller).revokeRole(GOVERNANCE_ROLE, controller.address)
+            ).to.be.revertedWithCustomError(registry, "WouldRemoveLastGovernance");
+        });
+
+        it("B-06-d: granting GOVERNANCE_ROLE to an address that already holds it is idempotent (count does not double-increment)", async function () {
+            const GOVERNANCE_ROLE = await registry.GOVERNANCE_ROLE();
+            await registry.connect(controller).grantRole(GOVERNANCE_ROLE, other.address);
+
+            // Grant again — should not increment count a second time
+            await registry.connect(controller).grantRole(GOVERNANCE_ROLE, other.address);
+
+            // Revoke other: count should drop to 1 (not 0), so this succeeds
+            await expect(
+                registry.connect(controller).revokeRole(GOVERNANCE_ROLE, other.address)
+            ).to.emit(registry, "RoleRevoked");
+
+            // Now only controller remains — revoke should be blocked
+            await expect(
+                registry.connect(controller).revokeRole(GOVERNANCE_ROLE, controller.address)
+            ).to.be.revertedWithCustomError(registry, "WouldRemoveLastGovernance");
+        });
+
+        it("B-06-e: grantRole accepts all five known role constants", async function () {
+            const roles = [
+                await registry.REPORTER_ROLE(),
+                await registry.ACTION_ROLE(),
+                await registry.KEEPER_ROLE(),
+                await registry.GOVERNANCE_ROLE(),
+                await registry.PAUSE_COORDINATOR_ROLE(),
+            ];
+            for (const role of roles) {
+                await expect(
+                    registry.connect(controller).grantRole(role, other.address)
+                ).to.emit(registry, "RoleGranted");
+            }
+        });
+    });
+
     // ── Full happy-path lifecycle ──────────────────────────────────────────────
 
     describe("full lifecycle: WATCH → NORMAL", function () {

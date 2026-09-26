@@ -57,6 +57,9 @@ contract StableGuardVault is ERC4626, AccessControl {
         // PAUSE_COORDINATOR_ROLE is deliberately NOT granted here.
         // Governance must explicitly grant it to the StableGuardCREReceiver
         // after deployment, so the grant is a tracked, intentional action.
+        // IMPORTANT: this role must remain single-holder. Granting it to a second
+        // address would allow an independent pause that StableGuardCREReceiver's
+        // retry path could silently clear (see receiver retry branch — Finding 2).
         _setRoleAdmin(PAUSE_COORDINATOR_ROLE, GOVERNANCE_ROLE);
         _setRoleAdmin(GOVERNANCE_ROLE, GOVERNANCE_ROLE);
         // DEFAULT_ADMIN_ROLE (bytes32(0)) is intentionally left ungranted —
