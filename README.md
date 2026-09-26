@@ -37,10 +37,10 @@ Submitted to multiple hackathons: Pharos (Skill-to-Agent Dual Cascade), BNB HACK
 
 ## Signal Levels
 
-| Deviation | Signal | Action |
-|-----------|--------|--------|
-| 0-19 bps  | STABLE | HOLD |
-| 20-49 bps | WATCH  | MONITOR |
+| Deviation | Signal | Context |
+|-----------|--------|---------|
+| 0-19 bps  | STABLE | Within normal variance — consistent with routine price fluctuation |
+| 20-49 bps | WATCH  | Early deviation — historical pattern suggests self-correction within 1–2 hours |
 | 50-99 bps | ELEVATED | Deviation at this level has historically preceded further divergence |
 | 100+ bps  | CRITICAL | Sustained deviation at this level has coincided with liquidity contraction in prior events |
 

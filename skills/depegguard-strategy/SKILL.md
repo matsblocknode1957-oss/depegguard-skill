@@ -129,7 +129,7 @@ DAI at $0.9900 = 100 bps
 ### Step 3: Classify Signal Level
 
 0-19 bps = STABLE — Normal variance, no action
-20-49 bps = WATCH — Monitor closely
+20-49 bps = WATCH — Early deviation; historical data suggests self-correction within 1–2 hours at this level
 50-99 bps = ELEVATED — Deviation at this level has historically preceded further divergence
 100+ bps = CRITICAL — Deviation at this level is consistent with confirmed depeg events
 
@@ -180,13 +180,11 @@ There is no rolled-up `overall_risk` field. Derive the aggregate risk level by t
 
 STABLE (0-19 bps):
 Signal: STABLE
-Action: HOLD
-Reasoning: {coin} is trading within normal variance at {price}. No action required. Next review in 30 minutes.
+Description: {coin} is trading within normal variance at {price}. Deviation at this level is consistent with routine price fluctuation. Next review in 30 minutes.
 
 WATCH (20-49 bps):
 Signal: WATCH
-Action: MONITOR
-Reasoning: {coin} showing early deviation of {bps}bps. Historical pattern suggests this may self-correct within 1-2 hours. Set alert at 50bps threshold.
+Description: {coin} showing early deviation of {bps}bps. Deviation at this level has historically self-corrected within 1–2 hours. Next escalation threshold: 50 bps.
 
 ELEVATED (50-99 bps):
 Signal: ELEVATED
@@ -202,7 +200,7 @@ Always return a DepegGuard Strategy Report with the following sections:
 
 Generated timestamp
 
-Stablecoin Status table with columns: Coin, Price, Deviation, Signal, Action
+Stablecoin Status table with columns: Coin, Price, Deviation, Signal, Context
 
 Priority Alert showing the highest risk coin, its signal, and recommended action
 
@@ -268,8 +266,8 @@ On March 10, 2023, Silicon Valley Bank (SVB) was shut down by regulators. Circle
 
 | Date & Time (UTC) | USDC Price | Deviation | Signal | Signal Context |
 |---|---|---|---|---|
-| Mar 10 18:00 | $0.9982 | 18 bps | STABLE | HOLD — within normal variance |
-| Mar 10 21:00 | $0.9961 | 39 bps | WATCH | MONITOR — set alert at 50 bps |
+| Mar 10 18:00 | $0.9982 | 18 bps | STABLE | Within normal variance — deviation consistent with routine price fluctuation |
+| Mar 10 21:00 | $0.9961 | 39 bps | WATCH | Early deviation — deviation at this level has historically self-corrected within 1–2 hours |
 | Mar 11 01:00 | $0.9903 | 97 bps | ELEVATED | USDC crossed the ELEVATED threshold (50 bps) |
 | Mar 11 06:00 | $0.9877 | 123 bps | CRITICAL | USDC crossed the CRITICAL threshold (100 bps) |
 | Mar 11 12:00 | $0.9123 | 877 bps | CRITICAL | Full depeg in progress — 877 bps deviation |
@@ -309,7 +307,7 @@ On May 7, 2022, large coordinated withdrawals from Anchor Protocol (~$2B in 72 h
 
 | Date & Time (UTC) | UST Price | Deviation | Signal | Signal Context |
 |---|---|---|---|---|
-| May 7 18:00 | $0.9975 | 25 bps | WATCH | MONITOR — early deviation, set alert at 50 bps |
+| May 7 18:00 | $0.9975 | 25 bps | WATCH | Early deviation — deviation at this level has historically self-corrected within 1–2 hours |
 | May 8 06:00 | $0.9920 | 80 bps | ELEVATED | UST crossed the ELEVATED threshold (50 bps) |
 | May 8 18:00 | $0.9850 | 150 bps | CRITICAL | UST crossed the CRITICAL threshold (100 bps) |
 | May 9 12:00 | $0.6100 | 3,900 bps | CRITICAL | Deep depeg confirmed — death spiral in progress |
@@ -356,9 +354,9 @@ Unlike UST or USDC/SVB, USDT holders were not at risk of loss. But the depeg sig
 
 ### Timeline and Signal Progression
 
-| Date & Time (UTC) | USDT Price | Deviation | Signal | Recommended Action |
+| Date & Time (UTC) | USDT Price | Deviation | Signal | Signal Context |
 |---|---|---|---|---|
-| Mar 12 08:00 | $1.0028 | 28 bps | WATCH | MONITOR — premium forming, broader market stress detected |
+| Mar 12 08:00 | $1.0028 | 28 bps | WATCH | Premium forming — broader market stress detected |
 | Mar 12 14:00 | $1.0094 | 94 bps | ELEVATED | Demand surge pushing USDT above par; premium forming ahead of main crash wave |
 | Mar 12 20:00 | $1.0180 | 180 bps | CRITICAL | Active upward depeg — USDT trading well above par; buying at this level carries mean-reversion risk |
 | Mar 13 04:00 | $1.0241 | 241 bps | CRITICAL | Peak premium — USDT trading at sustained 241 bps above par on aggregate |
