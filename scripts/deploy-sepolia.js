@@ -19,7 +19,7 @@ const PENDING_TTL         =  3_600;  // 1 hour
 const RECOVERY_COOLDOWN   =  1_800;  // 30 min
 
 // StableGuardCREReceiver
-const MAX_REPORT_AGE = 604_800;      // 7 days
+const MAX_REPORT_AGE = 3_600;        // 1 hour (matches contract NatSpec suggested value)
 
 // StableGuardVault
 const VAULT_NAME   = "StableGuard USDC Vault";
