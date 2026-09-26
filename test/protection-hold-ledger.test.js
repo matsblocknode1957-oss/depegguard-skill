@@ -312,6 +312,43 @@ describe("ProtectionHoldLedger", function () {
         });
     });
 
+    // ── transferGovernance ─────────────────────────────────────────────────────
+
+    describe("transferGovernance", function () {
+        it("transfers governance to a new address", async function () {
+            await ledger.connect(governance).transferGovernance(other.address);
+            expect(await ledger.governance()).to.equal(other.address);
+        });
+
+        it("new governance can call forceTransferCoordinator; old governance cannot", async function () {
+            await ledger.connect(governance).transferGovernance(other.address);
+            await expect(
+                ledger.connect(governance).forceTransferCoordinator(other.address)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+            await expect(
+                ledger.connect(other).forceTransferCoordinator(coordinator.address)
+            ).to.emit(ledger, "CoordinatorTransferred");
+        });
+
+        it("emits GovernanceTransferred", async function () {
+            await expect(ledger.connect(governance).transferGovernance(other.address))
+                .to.emit(ledger, "GovernanceTransferred")
+                .withArgs(governance.address, other.address);
+        });
+
+        it("reverts from non-governance", async function () {
+            await expect(
+                ledger.connect(other).transferGovernance(other.address)
+            ).to.be.revertedWithCustomError(ledger, "Unauthorized");
+        });
+
+        it("reverts with zero address", async function () {
+            await expect(
+                ledger.connect(governance).transferGovernance(ethers.ZeroAddress)
+            ).to.be.revertedWithCustomError(ledger, "ZeroAddress");
+        });
+    });
+
     // ── requiredFreezeMode ─────────────────────────────────────────────────────
 
     describe("requiredFreezeMode", function () {

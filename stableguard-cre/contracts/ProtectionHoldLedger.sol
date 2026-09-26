@@ -36,7 +36,7 @@ contract ProtectionHoldLedger {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
-    address public immutable governance;
+    address public governance;
     address public coordinator;
 
     mapping(bytes32 => ProtectionHold) public holds;
@@ -63,6 +63,7 @@ contract ProtectionHoldLedger {
         bool            vaultFullyReleased
     );
     event CoordinatorTransferred(address indexed oldCoordinator, address indexed newCoordinator);
+    event GovernanceTransferred(address indexed oldGovernance, address indexed newGovernance);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -108,6 +109,16 @@ contract ProtectionHoldLedger {
         address old = coordinator;
         coordinator = newCoordinator;
         emit CoordinatorTransferred(old, newCoordinator);
+    }
+
+    // ── transferGovernance ────────────────────────────────────────────────────
+
+    function transferGovernance(address newGovernance) external {
+        if (msg.sender != governance) revert Unauthorized();
+        if (newGovernance == address(0)) revert ZeroAddress();
+        address old = governance;
+        governance = newGovernance;
+        emit GovernanceTransferred(old, newGovernance);
     }
 
     // ── forceTransferCoordinator ──────────────────────────────────────────────
