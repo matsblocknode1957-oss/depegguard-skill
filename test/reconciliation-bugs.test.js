@@ -130,13 +130,14 @@ describe("Bug-1: acquire() revert produces FAILED destinationCallback", function
     });
 });
 
-// ── Bug 2: vault.unpause() reverts → FAILED destinationCallback ───────────────
+// ── Bug-2: vault.unpause() reverts → callback suppressed, event stays RECOVERY_PENDING ──
 //
-// The old code used `cbState = holdReleased ? COMPLETE : FAILED`, which reported
-// COMPLETE even when vault.unpause() had thrown.  The fix requires both
-// holdReleased AND unpaused before sending COMPLETE.
+// The original wrong code sent COMPLETE even when unpause threw (cbState=holdReleased).
+// An intermediate fix sent FAILED when !unpaused — but that terminated single-destination
+// events permanently (G11).  The final fix skips the callback entirely when holdReleased
+// && !unpaused, leaving the destination PENDING for the next cycle's autonomous retry path.
 
-describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", function () {
+describe("Bug-2: vault.unpause() revert suppresses callback; event stays RECOVERY_PENDING", function () {
     let receiver, registry, eventRegistry, holdLedger, flakyVault;
     let forwarder, admin, coinA;
 
@@ -174,7 +175,7 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
         );
     });
 
-    it("hold released but event FAILED when vault.unpause() reverts during auto-recovery", async function () {
+    it("hold released but callback suppressed when vault.unpause() reverts; event stays RECOVERY_PENDING", async function () {
         // Alert → CONFIRMED_DEPEG → vault paused → PROTECTED
         await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
         expect(await flakyVault.paused()).to.equal(true);
@@ -194,26 +195,22 @@ describe("Bug-2: vault.unpause() revert produces FAILED destinationCallback", fu
         // unpause threw → vault still paused
         expect(await flakyVault.paused()).to.equal(true);
 
-        // destinationCallback received FAILED → 1 dest, all FAILED → terminal FAILED
+        // callback suppressed (holdReleased && !unpaused) → event stays RECOVERY_PENDING
         const ev = await eventRegistry.getDepegEvent(firstId);
-        expect(Number(ev.state)).to.equal(S.FAILED);
+        expect(Number(ev.state)).to.equal(S.RECOVERY_PENDING);
     });
 });
 
-// ── Bug-2 retry: unpause-only retry succeeds without HoldAlreadyReleased ──────
+// ── Bug-2 single-dest retry: callback suppression allows autonomous retry ──────
 //
-// After release() succeeds, _coinHoldId[coin] is cleared to bytes32(0).
-// On the next cycle the receiver must detect "hold gone, vault still paused"
-// and re-attempt unpause without calling release() again (which would throw
-// HoldAlreadyReleased).  The fix adds an else-if branch that fires when
-// _coinHoldId[coin]==0 && activeHoldCount==0.
-//
-// To keep the event in RECOVERY_PENDING after the first FAILED callback we set
-// up 2 destinations via admin.initiateRecovery(): dest-0 is the local vault,
-// dest-1 is a stub that stays PENDING.  With dest-1 still PENDING the
-// _evaluateRecovery aggregate is "partial settled → stay RECOVERY_PENDING".
+// With the fix, when holdReleased && !unpaused the receiver skips the callback,
+// leaving the destination slot PENDING and the event alive in RECOVERY_PENDING.
+// The next cycle's retry path (_coinHoldId==0, activeHoldCount==0) re-attempts
+// vault.unpause() without calling release() again — HoldAlreadyReleased is
+// never thrown.  Once unpause succeeds, destinationCallback(COMPLETE) fires;
+// after recoveryCooldown elapses, _evaluateRecovery G10 terminates to NORMAL.
 
-describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyReleased", function () {
+describe("Bug-2 single-dest retry: callback skipped on unpause failure, retries autonomously, resolves NORMAL", function () {
     let receiver, registry, eventRegistry, holdLedger, flakyVault;
     let forwarder, admin, coinA;
 
@@ -251,36 +248,41 @@ describe("Bug-2 retry: vault unpauses on second attempt without HoldAlreadyRelea
         );
     });
 
-    it("vault unpauses on retry without reverting on HoldAlreadyReleased", async function () {
+    it("vault unpauses and event resolves NORMAL after one failed cycle, no manual intervention", async function () {
         // Alert → CONFIRMED_DEPEG → vault paused → PROTECTED (1 dest, COMPLETE)
         await receiver.connect(forwarder).onReport("0x", encodeReport([coinA.address], [2], 2));
         expect(await flakyVault.paused()).to.equal(true);
 
         const firstId = await eventRegistry.getActiveEventId(coinA.address);
+        expect(Number((await eventRegistry.getDepegEvent(firstId)).state)).to.equal(S.PROTECTED);
 
-        // Admin manually opens recovery with 2 destinations so that dest-0 FAILED
-        // does not immediately terminate the event (dest-1 stays PENDING → partial).
-        await eventRegistry.connect(admin).initiateRecovery(firstId, [
-            { chainSelector: LOCAL_CHAIN_SELECTOR, vault: await flakyVault.getAddress() },
-            { chainSelector: 999n,                 vault: admin.address }
-        ]);
-
-        // Attempt 1: hold released, unpause reverts → cbState = FAILED
+        // Arm unpause revert before auto-recovery fires
         await flakyVault.setUnpauseReverts(true);
-        await receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]));
 
-        // vault still paused; event still RECOVERY_PENDING (dest-1 = PENDING → not all settled)
+        // STABILITY_WINDOW stable reports: report 1 → stableCount=1, report 2 → stableCount=2,
+        // report 3 → stableCount+1==STABILITY_WINDOW → _applyAutoRecovery fires.
+        // Recovery block: hold released, unpause reverts → callback SKIPPED → dest stays PENDING.
+        for (let i = 0; i < STABILITY_WINDOW; i++) {
+            await receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]));
+        }
+
+        // vault still paused; event stays RECOVERY_PENDING — no FAILED callback was sent
         expect(await flakyVault.paused()).to.equal(true);
         expect(Number((await eventRegistry.getDepegEvent(firstId)).state))
             .to.equal(S.RECOVERY_PENDING);
 
-        // Attempt 2: _coinHoldId[coin] == 0, activeHoldCount == 0 → retry path
-        // must NOT throw HoldAlreadyReleased; vault.unpause() now succeeds.
+        // Fix unpause and advance past recoveryCooldown so G10 can terminate to NORMAL
         await flakyVault.setUnpauseReverts(false);
-        await expect(
-            receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]))
-        ).to.not.be.reverted;
+        await time.increase(Number(RECOVERY_COOLDOWN) + 1);
+
+        // Retry cycle: _coinHoldId==0, activeHoldCount==0 → retry path → unpause succeeds →
+        // destinationCallback(COMPLETE) → G10 (cooldown elapsed) → _terminate(NORMAL)
+        await receiver.connect(forwarder).onReport("0x", stableReport([coinA.address]));
+
         expect(await flakyVault.paused()).to.equal(false);
+        const ev = await eventRegistry.getDepegEvent(firstId);
+        expect(Number(ev.state)).to.equal(S.NORMAL);
+        expect(await eventRegistry.getActiveEventId(coinA.address)).to.equal(ethers.ZeroHash);
     });
 });
 

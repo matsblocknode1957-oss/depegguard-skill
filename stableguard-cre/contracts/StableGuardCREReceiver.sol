@@ -64,7 +64,9 @@ interface IProtectionHoldLedger {
  *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
  *   3. holdLedger.acquire()          — claim hold; no vault freeze attempted if this fails
  *   4. vault.pause() or pauseDeposits() — only if acquire succeeded; hold released on freeze failure
- *   5. eventRegistry.destinationCallback(COMPLETE | FAILED) — honest result
+ *   5. eventRegistry.destinationCallback(COMPLETE | FAILED | skipped) — COMPLETE on
+ *      full success; FAILED only if hold release itself failed; skipped when hold
+ *      released but vault unpause failed (destination stays PENDING for next-cycle retry)
  *
  * Constructor args:
  *   forwarder         Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88
@@ -302,13 +304,21 @@ contract StableGuardCREReceiver {
                         unpaused = !IPausable(vault).paused() && !IPausable(vault).depositsFrozen();
                     }
 
-                    IDepegEventRegistry.DestState cbState = (holdReleased && unpaused)
-                        ? IDepegEventRegistry.DestState.COMPLETE
-                        : IDepegEventRegistry.DestState.FAILED;
-                    try eventRegistry.destinationCallback(eventId, 0, cbState) { }
-                    catch (bytes memory reason) {
-                        emit RegistryCallbackFailed(eventId, coin, reason);
+                    if (!holdReleased) {
+                        // Hold release itself failed — genuine failure, cannot self-recover.
+                        try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.FAILED) { }
+                        catch (bytes memory reason) {
+                            emit RegistryCallbackFailed(eventId, coin, reason);
+                        }
+                    } else if (unpaused) {
+                        // Hold released and vault fully unpaused — complete success.
+                        try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
+                        catch (bytes memory reason) {
+                            emit RegistryCallbackFailed(eventId, coin, reason);
+                        }
                     }
+                    // holdReleased && !unpaused: skip callback — destination stays PENDING so
+                    // the event remains in RECOVERY_PENDING for the next cycle's retry path.
                 }
                 // Permissionless; silent if cooldown not yet elapsed
                 try eventRegistry.finalizeRecovery(eventId) { } catch { }
