@@ -2,11 +2,53 @@
 pragma solidity 0.8.24;
 
 interface IExposureRegistry {
+    enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
     function isExposed(address vault, bytes32 symbol) external view returns (bool);
+    function vaultFreezeMode(address vault) external view returns (FreezeMode);
 }
 
 interface IPausable {
     function pause() external;
+    function unpause() external;
+    function paused() external view returns (bool);
+    function pauseDeposits() external;
+    function unpauseDeposits() external;
+    function depositsFrozen() external view returns (bool);
+}
+
+interface IDepegEventRegistry {
+    enum State {
+        WATCH, CONFIRMED_DEPEG, PROTECTION_PENDING, PARTIALLY_PROTECTED,
+        PROTECTED, RECOVERY_PENDING, PARTIALLY_RECOVERED,
+        NORMAL, EXPIRED, FAILED, SUPERSEDED
+    }
+    enum DestState { PENDING, COMPLETE, SUPERSEDED, FAILED }
+    struct DestinationInput { uint64 chainSelector; address vault; }
+
+    function processReport(address coin, uint8 score, bytes32 evidenceRoot)
+        external returns (bytes32 eventId, State resultState);
+    function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
+    function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
+    function resumeProtectionTracking(
+        address coin,
+        bytes32 evidenceRoot,
+        DestinationInput[] calldata dests,
+        bytes32 expiredEventId,
+        bytes32 holdId
+    ) external returns (bytes32 eventId);
+    function finalizeRecovery(bytes32 eventId) external;
+}
+
+interface IProtectionHoldLedger {
+    // Mirrors ProtectionHoldLedger.FreezeMode and ExposureRegistry.FreezeMode (PR #4).
+    // Values are ABI-compatible across all three definitions.
+    enum FreezeMode { FULL_FREEZE, DEPOSIT_ONLY_FREEZE }
+
+    function acquire(address vault, bytes32 rootIncidentId, bytes32 assetId, FreezeMode mode)
+        external returns (bytes32 holdId);
+    function release(bytes32 holdId) external returns (bool vaultFullyReleased);
+    function activeHoldCount(address vault) external view returns (uint256);
+    function requiredFreezeMode(address vault) external view returns (FreezeMode);
 }
 
 /**
@@ -14,27 +56,52 @@ interface IPausable {
  *
  * Receives ABI-encoded depeg reports from the StableGuard CRE workflow via
  * the KeystoneForwarder. Decodes and stores the latest composite signal state,
- * emitting events for offchain indexers.
+ * emitting events for offchain indexers, then drives the DepegEventRegistry
+ * state machine and executes an exposure-gated vault pause.
  *
- * Constructor arg (forwarder):
- *   Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88  (MockKeystoneForwarder, Sepolia)
- *   Production           : 0xF8344CFd5c43616a4366C34E3EEE75af79a74482  (KeystoneForwarder, Sepolia)
+ * Per-coin call sequence in onReport() (each call independently try/caught):
+ *   1. eventRegistry.processReport   — advance state machine
+ *   2. eventRegistry.initiateProtection — only when state → CONFIRMED_DEPEG
+ *   3. holdLedger.acquire()          — claim hold; no vault freeze attempted if this fails
+ *   4. vault.pause() or pauseDeposits() — only if acquire succeeded; hold released on freeze failure
+ *   5. eventRegistry.destinationCallback(COMPLETE | FAILED | skipped) — COMPLETE on
+ *      full success; FAILED only if hold release itself failed; skipped when hold
+ *      released but vault unpause failed (destination stays PENDING for next-cycle retry)
  *
- * Payload schema (matches main.ts encodeAbiParameters call):
- *   address[] coins, uint256[] prices, uint256[] deviationsBps,
- *   uint8[] signalLevels, bytes[] fullReports,
- *   uint8 compositeScore, uint8 marketStress, uint256 observedAt
+ * Constructor args:
+ *   forwarder         Broadcast simulation : 0x15fC6ae953E024d975e77382eEeC56A9101f9F88
+ *                     Production           : 0xF8344CFd5c43616a4366C34E3EEE75af79a74482
+ *   exposureRegistry  ExposureRegistry that gates which vault/symbol pairs are tracked
+ *   eventRegistry     DepegEventRegistry (must transferController to this address after deploy)
+ *   vault             Target vault to pause on confirmed depeg
+ *   localChainSelector CCIP chain selector for the local chain (used as destination ID)
+ *   holdLedger        ProtectionHoldLedger (must transferCoordinator to this address after deploy;
+ *                     governance on the ledger can call forceTransferCoordinator as an emergency
+ *                     override if this receiver becomes compromised or unresponsive)
+ *   maxReportAge      Maximum seconds between a report's observedAt and block.timestamp.
+ *                     Reports with observedAt in the future or older than this window are
+ *                     rejected (ReportTooOld).  Reports whose observedAt is not strictly
+ *                     greater than the last accepted observedAt are also rejected (StaleReport),
+ *                     preventing replay of previously processed reports.  Suggested: 3600.
  */
 contract StableGuardCREReceiver {
-    address public immutable forwarder;
-    IExposureRegistry public immutable exposureRegistry;
-    address public immutable vault;
-    uint8   public immutable pauseThreshold;
+    address                public immutable forwarder;
+    IExposureRegistry      public immutable exposureRegistry;
+    IDepegEventRegistry    public immutable eventRegistry;
+    address                public immutable vault;
+    uint64                 public immutable localChainSelector;
+    IProtectionHoldLedger  public immutable holdLedger;
+    uint256                public immutable maxReportAge;
 
     uint8   public lastCompositeScore;
     uint8   public lastMarketStress;
     uint256 public lastObservedAt;
+    uint256 public lastAcceptedObservedAt;
     uint256 public reportCount;
+
+    // Per-coin hold tracking for lineage proof on resumeProtectionTracking
+    mapping(address => bytes32) private _coinHoldId;   // coin => active holdId (0 = none)
+    mapping(address => bytes32) private _lastEventId;  // coin => last non-zero eventId seen
 
     struct CoinSignal {
         address coin;
@@ -64,18 +131,33 @@ contract StableGuardCREReceiver {
     // the pause for that coin — this event is the only on-chain signal of that gap.
     event VaultExposureMissing(address indexed vault, bytes32 indexed symbol);
 
+    event RegistryUpdateFailed(address indexed coin, bytes reason);
+    event VaultPauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
+    event VaultUnpauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
+    event RegistryCallbackFailed(bytes32 indexed eventId, address indexed coin, bytes reason);
+    event RecoveryResumeFailed(address indexed coin, bytes reason);
+
     error UnauthorizedForwarder(address caller);
+    error ReportTooOld(uint256 observedAt, uint256 blockTimestamp, uint256 maxAge);
+    error StaleReport(uint256 observedAt, uint256 lastAccepted);
+    error DuplicateCoin(address coin);
 
     constructor(
         address _forwarder,
         address _exposureRegistry,
+        address _eventRegistry,
         address _vault,
-        uint8   _pauseThreshold
+        uint64  _localChainSelector,
+        address _holdLedger,
+        uint256 _maxReportAge
     ) {
-        forwarder         = _forwarder;
-        exposureRegistry  = IExposureRegistry(_exposureRegistry);
-        vault             = _vault;
-        pauseThreshold    = _pauseThreshold;
+        forwarder           = _forwarder;
+        exposureRegistry    = IExposureRegistry(_exposureRegistry);
+        eventRegistry       = IDepegEventRegistry(_eventRegistry);
+        vault               = _vault;
+        localChainSelector  = _localChainSelector;
+        holdLedger          = IProtectionHoldLedger(_holdLedger);
+        maxReportAge        = _maxReportAge;
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
@@ -99,6 +181,23 @@ contract StableGuardCREReceiver {
         // suppress unused-var warning for fullReports
         fullReports;
 
+        // ── Report validation guards ───────────────────────────────────────────
+        // Freshness: reject reports from the future or older than maxReportAge.
+        if (observedAt > block.timestamp || block.timestamp - observedAt > maxReportAge)
+            revert ReportTooOld(observedAt, block.timestamp, maxReportAge);
+        // Replay: reject reports whose observedAt is not strictly newer than the
+        // last accepted report — prevents resubmission of any captured report.
+        if (observedAt <= lastAcceptedObservedAt)
+            revert StaleReport(observedAt, lastAcceptedObservedAt);
+        // Duplicate-asset: reject reports listing the same coin address twice,
+        // which would process one signal as two independent depeg events.
+        for (uint256 i = 0; i < coins.length; i++) {
+            for (uint256 j = i + 1; j < coins.length; j++) {
+                if (coins[i] == coins[j]) revert DuplicateCoin(coins[i]);
+            }
+        }
+        lastAcceptedObservedAt = observedAt;
+
         uint256 idx = reportCount++;
         lastCompositeScore = compositeScore;
         lastMarketStress   = marketStress;
@@ -119,17 +218,222 @@ contract StableGuardCREReceiver {
 
         emit DepegReport(idx, compositeScore, marketStress, observedAt);
 
-        // Exposure-gated vault pause: only pause if vault provably holds the alerted asset
-        if (compositeScore >= pauseThreshold) {
-            for (uint256 i = 0; i < coins.length; i++) {
-                if (signalLevels[i] >= 1) {
-                    bytes32 sym = bytes32(uint256(uint160(coins[i])));
-                    if (!exposureRegistry.isExposed(vault, sym)) {
-                        emit VaultExposureMissing(vault, sym);
-                        continue;
+        for (uint256 i = 0; i < coins.length; i++) {
+            address coin  = coins[i];
+            uint8   level = signalLevels[i];
+
+            // Call 1: advance state machine; skip this coin on any registry failure
+            bytes32 eventId;
+            IDepegEventRegistry.State newState;
+            try eventRegistry.processReport(coin, level, bytes32(0))
+                returns (bytes32 _eventId, IDepegEventRegistry.State _newState)
+            {
+                eventId  = _eventId;
+                newState = _newState;
+            } catch (bytes memory reason) {
+                emit RegistryUpdateFailed(coin, reason);
+                continue;
+            }
+
+            // Track the last non-zero eventId per coin for resumeProtectionTracking lineage
+            if (eventId != bytes32(0)) _lastEventId[coin] = eventId;
+
+            bytes32 sym = bytes32(uint256(uint160(coin)));
+
+            // ── Auto-recovery: vault unpause ──────────────────────────────────────
+            // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
+            // and on subsequent cycles until the destination slot is settled.
+            if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
+                if (IPausable(vault).paused() || IPausable(vault).depositsFrozen()) {
+                    bytes32 hId = _coinHoldId[coin];
+                    bool holdReleased = false;
+                    bool vaultFullyReleased = false;
+                    if (hId != bytes32(0)) {
+                        try holdLedger.release(hId) returns (bool _vfr) {
+                            _coinHoldId[coin] = bytes32(0);
+                            holdReleased = true;
+                            vaultFullyReleased = _vfr;
+                        } catch { }
+                    } else if (holdLedger.activeHoldCount(vault) == 0) {
+                        // Retry path: hold released in a prior cycle but unpause failed.
+                        // No holds remain — treat as fully released and attempt unpause.
+                        //
+                        // Safety assumption: PAUSE_COORDINATOR_ROLE is held exclusively by this
+                        // receiver. If a second coordinator independently paused the vault between
+                        // the hold release and this retry, this unpause would silently clear that
+                        // independent pause. Granting PAUSE_COORDINATOR_ROLE to additional addresses
+                        // would reintroduce this risk; keep the role single-holder.
+                        holdReleased = true;
+                        vaultFullyReleased = true;
                     }
-                    IPausable(vault).pause();
+
+                    if (vaultFullyReleased) {
+                        // Unfreeze based on actual vault state, not the configured freeze mode.
+                        // Handles mid-incident mode changes: vault.paused() / depositsFrozen()
+                        // reflect what was applied, not what mode is currently configured.
+                        if (IPausable(vault).paused()) {
+                            try IPausable(vault).unpause() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                        }
+                        if (IPausable(vault).depositsFrozen()) {
+                            try IPausable(vault).unpauseDeposits() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                        }
+                    } else if (holdLedger.activeHoldCount(vault) > 0) {
+                        // Partial release / downgrade: remaining holds only require
+                        // DEPOSIT_ONLY_FREEZE but vault is currently fully paused.
+                        // Step down: remove the full pause then apply the lighter deposit freeze.
+                        IProtectionHoldLedger.FreezeMode aggMode = holdLedger.requiredFreezeMode(vault);
+                        if (aggMode == IProtectionHoldLedger.FreezeMode.DEPOSIT_ONLY_FREEZE
+                            && IPausable(vault).paused())
+                        {
+                            try IPausable(vault).unpause() { }
+                            catch (bytes memory reason) {
+                                emit VaultUnpauseFailed(vault, sym, reason);
+                            }
+                            try IPausable(vault).pauseDeposits() { }
+                            catch (bytes memory reason) {
+                                emit VaultPauseFailed(vault, sym, reason);
+                            }
+                        }
+                    }
+
+                    // Partial release: downgrade is best-effort; callback depends only on holdReleased.
+                    // Full release: re-check actual vault state — both unfreeze ops are fire-and-forget,
+                    // so re-reading confirms whether they succeeded.
+                    bool unpaused = !vaultFullyReleased;
+                    if (vaultFullyReleased) {
+                        unpaused = !IPausable(vault).paused() && !IPausable(vault).depositsFrozen();
+                    }
+
+                    if (!holdReleased) {
+                        // Hold release itself failed — genuine failure, cannot self-recover.
+                        try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.FAILED) { }
+                        catch (bytes memory reason) {
+                            emit RegistryCallbackFailed(eventId, coin, reason);
+                        }
+                    } else if (unpaused) {
+                        // Hold released and vault fully unpaused — complete success.
+                        try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
+                        catch (bytes memory reason) {
+                            emit RegistryCallbackFailed(eventId, coin, reason);
+                        }
+                    }
+                    // holdReleased && !unpaused: skip callback — destination stays PENDING so
+                    // the event remains in RECOVERY_PENDING for the next cycle's retry path.
                 }
+                // Permissionless; silent if cooldown not yet elapsed
+                try eventRegistry.finalizeRecovery(eventId) { } catch { }
+                continue;
+            }
+
+            // ── Recovery continuation: re-open tracking on paused vault ───────────
+            // Fires when the prior PROTECTED event expired before stableCount
+            // reached stabilityWindow. The vault is still paused and needs
+            // a fresh PROTECTED event to re-arm auto-recovery.
+            if (eventId == bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
+                IDepegEventRegistry.DestinationInput[] memory resumeDests =
+                    new IDepegEventRegistry.DestinationInput[](1);
+                resumeDests[0] = IDepegEventRegistry.DestinationInput({
+                    chainSelector: localChainSelector,
+                    vault:         vault
+                });
+                try eventRegistry.resumeProtectionTracking(
+                    coin, bytes32(0), resumeDests,
+                    _lastEventId[coin], _coinHoldId[coin]
+                ) { }
+                catch (bytes memory reason) {
+                    emit RecoveryResumeFailed(coin, reason);
+                }
+                continue;
+            }
+
+            if (newState != IDepegEventRegistry.State.CONFIRMED_DEPEG) continue;
+
+            // Exposure gate: only protect vaults that demonstrably hold the asset
+            if (!exposureRegistry.isExposed(vault, sym)) {
+                emit VaultExposureMissing(vault, sym);
+                continue;
+            }
+
+            // Call 2: CONFIRMED_DEPEG → PROTECTION_PENDING; silent catch (may already
+            // be in-flight if a previous cycle fired before this callback arrived)
+            IDepegEventRegistry.DestinationInput[] memory dests =
+                new IDepegEventRegistry.DestinationInput[](1);
+            dests[0] = IDepegEventRegistry.DestinationInput({
+                chainSelector: localChainSelector,
+                vault:         vault
+            });
+            try eventRegistry.initiateProtection(eventId, dests) {
+                // fall through to pause
+            } catch {
+                continue;
+            }
+
+            // Call 3: acquire hold first — if this fails, no vault freeze is attempted.
+            // Eliminates the orphaned-pause state that arises when acquire() throws after
+            // pause() has already executed: vault frozen, no hold on record, next report
+            // calls pause() again on an already-paused vault.
+            IExposureRegistry.FreezeMode freezeMode = exposureRegistry.vaultFreezeMode(vault);
+            bool holdAcquired = false;
+            bytes32 acquiredHoldId;
+            try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
+                returns (bytes32 hId)
+            {
+                _coinHoldId[coin] = hId;
+                acquiredHoldId    = hId;
+                holdAcquired      = true;
+            } catch { }
+
+            // Call 4: freeze vault — only if hold was acquired.
+            // alreadyFrozen short-circuit uses > 1 (not > 0) because our hold was just
+            // added, so the pre-existing count is activeHoldCount - 1.
+            // On freeze failure, release the hold to prevent a dangling hold with no
+            // corresponding freeze.
+            bool pauseResult = false;
+            if (holdAcquired) {
+                bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
+                    ? IPausable(vault).paused()
+                    : IPausable(vault).depositsFrozen();
+
+                if (holdLedger.activeHoldCount(vault) > 1 && alreadyFrozen) {
+                    pauseResult = true;
+                } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
+                    try IPausable(vault).pause() {
+                        pauseResult = true;
+                    } catch (bytes memory reason) {
+                        emit VaultPauseFailed(vault, sym, reason);
+                    }
+                } else {
+                    try IPausable(vault).pauseDeposits() {
+                        pauseResult = true;
+                    } catch (bytes memory reason) {
+                        emit VaultPauseFailed(vault, sym, reason);
+                    }
+                }
+
+                if (!pauseResult) {
+                    try holdLedger.release(acquiredHoldId) { } catch { }
+                    _coinHoldId[coin] = bytes32(0);
+                    holdAcquired      = false;
+                }
+            }
+
+            // Call 5: close the destination slot with the honest result.
+            // Due to the rollback above, holdAcquired is false whenever pauseResult
+            // is false — so this is effectively equivalent to just `holdAcquired`,
+            // but both terms are kept for defensive clarity.
+            IDepegEventRegistry.DestState dcState = (holdAcquired && pauseResult)
+                ? IDepegEventRegistry.DestState.COMPLETE
+                : IDepegEventRegistry.DestState.FAILED;
+            try eventRegistry.destinationCallback(eventId, 0, dcState) {
+                // ack
+            } catch (bytes memory reason) {
+                emit RegistryCallbackFailed(eventId, coin, reason);
             }
         }
     }
