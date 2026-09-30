@@ -62,6 +62,14 @@ async function main() {
   console.log("Network:          ", network);
   console.log("Caller:           ", caller.address);
 
+  const DEPLOYER = "0xcBB1AD132bB51Cc41210309d6e3bd45598eebb5e";
+  if (caller.address.toLowerCase() !== DEPLOYER.toLowerCase()) {
+    throw new Error(
+      `Wrong wallet: got ${caller.address}, expected deployer ${DEPLOYER}.\n` +
+      "Set CRE_ETH_PRIVATE_KEY in stableguard-cre/.env to the deployer private key."
+    );
+  }
+
   // ── 1. Confirm vault.asset() matches the expected testnet USDC ────────────
   const vault = new hre.ethers.Contract(addrs.vault, VAULT_ABI, caller);
   const onChainAsset = await vault.asset();
