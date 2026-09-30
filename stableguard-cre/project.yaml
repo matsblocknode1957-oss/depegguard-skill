@@ -42,3 +42,15 @@ production-settings:
     - chain-name: ethereum-testnet-sepolia
       url: https://ethereum-sepolia-rpc.publicnode.com
 
+# ==========================================================================
+arbitrum-staging-settings:
+  rpcs:
+    - chain-name: arbitrum-testnet-sepolia
+      url: https://sepolia-rollup.arbitrum.io/rpc
+
+# ==========================================================================
+arbitrum-production-settings:
+  rpcs:
+    - chain-name: arbitrum-testnet-sepolia
+      url: https://sepolia-rollup.arbitrum.io/rpc
+

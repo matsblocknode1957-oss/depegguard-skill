@@ -2,7 +2,7 @@
   "schedule": "0 */5 * * * *",
   "chainSelectorName": "ethereum-testnet-sepolia",
   "consumerAddress": "0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b",
-  "monitorAddress": "0x44930ef915b30CbA75C0B94d62cE516d7900d27C",
+  "chainSelector": "16015286601757825753",
   "dataStreamsBaseUrl": "https://api.chain.link",
   "coins": [
     {

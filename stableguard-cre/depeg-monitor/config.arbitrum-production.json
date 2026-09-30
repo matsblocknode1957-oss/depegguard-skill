@@ -1,9 +1,8 @@
 {
-  "schedule": "*/30 * * * * *",
-  "chainSelectorName": "ethereum-testnet-sepolia",
-  "consumerAddress": "0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b",
-  "chainSelector": "16015286601757825753",
-  "stubScenario": "depeg",
+  "schedule": "0 */5 * * * *",
+  "chainSelectorName": "arbitrum-testnet-sepolia",
+  "consumerAddress": "0x8A3De0095Eb8741f89d3a3BF71DEA1d4857a9bbd",
+  "chainSelector": "3478487238524512106",
   "dataStreamsBaseUrl": "https://api.chain.link",
   "coins": [
     {

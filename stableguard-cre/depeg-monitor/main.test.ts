@@ -1,42 +1,58 @@
-import { describe, expect } from "bun:test";
-import { newTestRuntime, test } from "@chainlink/cre-sdk/test";
-import { onCronTrigger, initWorkflow } from "./main";
-import type { Config } from "./main";
+import { describe, it, expect } from "bun:test"
+import { calcDeviationBps, classifySignal } from "./helpers"
 
-describe("onCronTrigger", () => {
-  test("logs message and returns greeting", async () => {
-    const config: Config = { schedule: "*/5 * * * *" };
-    const runtime = newTestRuntime();
-    runtime.config = config;
+const ONE_USD = 1_000_000_000_000_000_000n
 
-    const result = onCronTrigger(runtime);
+describe("calcDeviationBps", () => {
+  it("returns 0 at peg", () => {
+    expect(calcDeviationBps(ONE_USD)).toBe(0n)
+  })
 
-    expect(result).toBe("Hello world!");
-    const logs = runtime.getLogs();
-    expect(logs).toContain("Hello world! Workflow triggered.");
-  });
-});
+  it("returns 5 bps above peg", () => {
+    // 1 bps = 1e14; 5 bps = 500_000_000_000_000n
+    expect(calcDeviationBps(ONE_USD + 500_000_000_000_000n)).toBe(5n)
+  })
 
-describe("initWorkflow", () => {
-  test("returns one handler with correct cron schedule", async () => {
-    const testSchedule = "0 0 * * *";
-    const config: Config = { schedule: testSchedule };
+  it("returns 5 bps below peg (symmetric)", () => {
+    expect(calcDeviationBps(ONE_USD - 500_000_000_000_000n)).toBe(5n)
+  })
 
-    const handlers = initWorkflow(config);
+  it("returns 300 bps for 3% depeg stub offset", () => {
+    // STUB_DEPEG_USDC_OFFSET = -30_000_000_000_000_000n
+    expect(calcDeviationBps(ONE_USD - 30_000_000_000_000_000n)).toBe(300n)
+  })
+})
 
-    expect(handlers).toBeArray();
-    expect(handlers).toHaveLength(1);
-    expect(handlers[0].trigger.config.schedule).toBe(testSchedule);
-  });
+describe("classifySignal", () => {
+  it("classifies 0 bps as STABLE (0)", () => {
+    expect(classifySignal(0n)).toBe(0)
+  })
 
-  test("handler executes onCronTrigger and returns result", async () => {
-    const config: Config = { schedule: "*/5 * * * *" };
-    const runtime = newTestRuntime();
-    runtime.config = config;
-    const handlers = initWorkflow(config);
+  it("classifies 19 bps as STABLE (0) — boundary below WATCH", () => {
+    expect(classifySignal(19n)).toBe(0)
+  })
 
-    const result = handlers[0].fn(runtime, {});
+  it("classifies 20 bps as WATCH (1) — boundary entry", () => {
+    expect(classifySignal(20n)).toBe(1)
+  })
 
-    expect(result).toBe(onCronTrigger(runtime));
-  });
-});
+  it("classifies 49 bps as WATCH (1) — boundary below ELEVATED", () => {
+    expect(classifySignal(49n)).toBe(1)
+  })
+
+  it("classifies 50 bps as ELEVATED (2) — boundary entry", () => {
+    expect(classifySignal(50n)).toBe(2)
+  })
+
+  it("classifies 99 bps as ELEVATED (2) — boundary below CRITICAL", () => {
+    expect(classifySignal(99n)).toBe(2)
+  })
+
+  it("classifies 100 bps as CRITICAL (3) — boundary entry", () => {
+    expect(classifySignal(100n)).toBe(3)
+  })
+
+  it("classifies 300 bps as CRITICAL (3) — stub depeg scenario", () => {
+    expect(classifySignal(300n)).toBe(3)
+  })
+})
