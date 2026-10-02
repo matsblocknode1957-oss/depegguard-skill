@@ -438,6 +438,11 @@ contract StableGuardCREReceiver {
         }
     }
 
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == 0x805f2132   // IReceiver: onReport(bytes,bytes)
+            || interfaceId == 0x01ffc9a7;  // IERC165
+    }
+
     function getLastCoins() external view returns (CoinSignal[] memory) {
         return lastCoins;
     }
