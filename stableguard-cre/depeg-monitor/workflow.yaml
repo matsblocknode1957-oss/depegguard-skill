@@ -17,6 +17,7 @@ production-settings:
 arbitrum-staging-settings:
   user-workflow:
     workflow-name: "depeg-monitor-arbitrum-staging"
+    deployment-registry: "private"
   workflow-artifacts:
     workflow-path: "./main.ts"
     config-path: "./config.arbitrum-staging.json"
