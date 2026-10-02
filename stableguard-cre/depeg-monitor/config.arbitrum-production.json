@@ -1,7 +1,7 @@
 {
   "schedule": "0 */5 * * * *",
   "chainSelectorName": "ethereum-testnet-sepolia-arbitrum-1",
-  "consumerAddress": "0x8A3De0095Eb8741f89d3a3BF71DEA1d4857a9bbd",
+  "consumerAddress": "0xac83a85Ee4dF1FfF44DFdEF055e95Db4886a9aD8",
   "chainSelector": "3478487238524512106",
   "dataStreamsBaseUrl": "https://api.chain.link",
   "coins": [
