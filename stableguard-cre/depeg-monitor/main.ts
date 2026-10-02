@@ -257,7 +257,7 @@ const onCronTrigger = (runtime: Runtime<Config>): string => {
   const tx = evmClient.writeReport(runtime, {
     receiver:  runtime.config.consumerAddress,
     report:    signedReport,
-    gasConfig: { gasLimit: "900000" },
+    gasConfig: { gasLimit: "2000000" },
   }).result()
 
   const txHashHex = tx.txHash ? uint8ArrayToHex(tx.txHash) : "none"
