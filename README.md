@@ -1,3 +1,36 @@
+## StableGuard: live on Arbitrum Sepolia (Arbitrum Open House Singapore Buildathon)
+
+StableGuard is a circuit breaker for stablecoin vaults. A Chainlink CRE workflow watches USDC, USDT, DAI and USDS, and freezes exposed vaults on a depeg, then unfreezes them when the peg recovers.
+
+**Demo video:** https://youtu.be/TnBZz8lVtpM
+
+**Live protection transaction** (simulated 3% USDC depeg, testnet): https://sepolia.arbiscan.io/tx/0x2bce3db20f25841c7d0570440ffd22e05542842302286da790d6c9591f1cbc6c
+
+### Arbitrum Sepolia contracts
+
+| Contract | Address |
+|----------|---------|
+| StableGuardVault | [0x86602cDeC52Df65Bc8D66528De429EB11A9E0497](https://sepolia.arbiscan.io/address/0x86602cDeC52Df65Bc8D66528De429EB11A9E0497) |
+| StableGuardCREReceiver | [0xac83a85Ee4dF1FfF44DFdEF055e95Db4886a9aD8](https://sepolia.arbiscan.io/address/0xac83a85Ee4dF1FfF44DFdEF055e95Db4886a9aD8) |
+| DepegEventRegistry | [0xAa940C87f3D3251fD297894b5cef7dC7e71b3665](https://sepolia.arbiscan.io/address/0xAa940C87f3D3251fD297894b5cef7dC7e71b3665) |
+| ProtectionHoldLedger | [0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b](https://sepolia.arbiscan.io/address/0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b) |
+| ExposureRegistry | [0x55fc74c807dd5aC468Cf2e9B5c26Abb9b1149945](https://sepolia.arbiscan.io/address/0x55fc74c807dd5aC468Cf2e9B5c26Abb9b1149945) |
+
+### How it works
+
+1. CRE workflow polls Chainlink price feeds and detects a depeg.
+2. The workflow writes a signed report to Chainlink KeystoneForwarder.
+3. KeystoneForwarder calls StableGuardCREReceiver, which verifies the report.
+4. StableGuardCREReceiver updates DepegEventRegistry, ProtectionHoldLedger and StableGuardVault to freeze/unfreeze exposed vaults.
+
+### Where to look
+
+- `stableguard-cre/contracts` — Solidity
+- `stableguard-cre/depeg-monitor` — CRE workflow
+- `test/` — 240 Hardhat tests
+
+---
+
 # DepegGuard Strategy Skill
 
 [![Live API](https://img.shields.io/badge/Live%20API-green?style=flat-square)](https://pegcheck.uk/api/depeg-status?coin=USDC) [![Agent ID 1312](https://img.shields.io/badge/Agent%20ID%201312-blue?style=flat-square)](https://testnet.bscscan.com/token/0x8004a818bfb912233c491871b3d84c89a494bd9e?a=1312) [![BNB Chain](https://img.shields.io/badge/BNB%20Chain-yellow?style=flat-square)](https://www.bnbchain.org) [![CMC Agent Hub](https://img.shields.io/badge/CMC%20Agent%20Hub-blue?style=flat-square)](https://coinmarketcap.com)
