@@ -1,0 +1,31 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-staging"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.staging.json"
+    secrets-path: "../secrets.yaml"
+
+production-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.production.json"
+    secrets-path: "../secrets.yaml"
+
+arbitrum-staging-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-arbitrum-staging"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.arbitrum-staging.json"
+    secrets-path: "../secrets.yaml"
+
+arbitrum-production-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-arbitrum"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.arbitrum-production.json"
+    secrets-path: "../secrets.yaml"
