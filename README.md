@@ -18,9 +18,9 @@ StableGuard is a circuit breaker for stablecoin vaults. A Chainlink CRE workflow
 
 ### How it works
 
-1. CRE workflow polls Chainlink price feeds and detects a depeg.
+1. On a schedule, the CRE workflow fetches Chainlink Data Streams prices for USDC, USDT, DAI and USDS and scores each coin.
 2. The workflow writes a signed report to Chainlink KeystoneForwarder.
-3. KeystoneForwarder calls StableGuardCREReceiver, which verifies the report.
+3. KeystoneForwarder verifies the Chainlink nodes' signatures and calls StableGuardCREReceiver, which rejects stale or replayed reports.
 4. StableGuardCREReceiver updates DepegEventRegistry, ProtectionHoldLedger and StableGuardVault to freeze/unfreeze exposed vaults.
 
 ### Where to look
