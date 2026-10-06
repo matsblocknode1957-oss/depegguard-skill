@@ -335,7 +335,7 @@ contract StableGuardCREReceiver {
             // Fires when the prior PROTECTED event expired before stableCount
             // reached stabilityWindow. The vault is still paused and needs
             // a fresh PROTECTED event to re-arm auto-recovery.
-            if (eventId == bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
+            if (eventId == bytes32(0) && _coinHoldId[coin] != bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
                 IDepegEventRegistry.DestinationInput[] memory resumeDests =
                     new IDepegEventRegistry.DestinationInput[](1);
                 resumeDests[0] = IDepegEventRegistry.DestinationInput({
