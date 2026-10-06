@@ -176,4 +176,137 @@ describe("StableGuardCREReceiver", function () {
                 "a fresh PROTECTED event should exist after a successful resume");
         });
     });
+
+    // ── Workflow auth guard (B-03) ─────────────────────────────────────────────
+    // Metadata layout from KeystoneForwarder (abi.encodePacked):
+    //   bytes32 workflowId | bytes10 workflowName | address workflowOwner | bytes2 reportId
+    // = 32 + 10 + 20 + 2 = 64 bytes total; checks require >= 62 bytes.
+
+    describe("workflow auth (B-03)", function () {
+        let receiver, deployer, fwd, other;
+        let workflowId, workflowOwner;
+
+        function makeReport(observedAt) {
+            const coder = ethers.AbiCoder.defaultAbiCoder();
+            return coder.encode(
+                ["address[]", "uint256[]", "uint256[]", "uint8[]", "bytes[]", "uint8", "uint8", "uint256"],
+                [[], [], [], [], [], 0, 0, observedAt]
+            );
+        }
+
+        function makeMetadata(owner, wfId) {
+            return ethers.solidityPacked(
+                ["bytes32", "bytes10", "address", "bytes2"],
+                [wfId, "0x00000000000000000000", owner, "0x0000"]
+            );
+        }
+
+        beforeEach(async function () {
+            [deployer, fwd, other] = await ethers.getSigners();
+            workflowId    = ethers.id("test-workflow");
+            workflowOwner = deployer.address;
+
+            const ReceiverFactory = await ethers.getContractFactory("StableGuardCREReceiver");
+            receiver = await ReceiverFactory.deploy(
+                fwd.address,         // forwarder
+                ethers.ZeroAddress,  // exposureRegistry
+                ethers.ZeroAddress,  // eventRegistry
+                ethers.ZeroAddress,  // vault
+                1n,                  // localChainSelector
+                ethers.ZeroAddress,  // holdLedger
+                3600n                // maxReportAge
+            );
+            await receiver.waitForDeployment();
+            // deployer is admin (constructor sets admin = msg.sender)
+        });
+
+        async function currentTs() {
+            return BigInt((await ethers.provider.getBlock("latest")).timestamp);
+        }
+
+        it("T1: wrong workflowOwner rejected, reportCount unchanged", async function () {
+            await receiver.connect(deployer).setExpectedWorkflowOwner(workflowOwner);
+            const wrongOwner = other.address;
+            const meta = makeMetadata(wrongOwner, workflowId);
+            const report = makeReport((await currentTs()) - 10n);
+            await expect(
+                receiver.connect(fwd).onReport(meta, report)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedWorkflow")
+             .withArgs(wrongOwner, workflowId);
+            expect(await receiver.reportCount()).to.equal(0n);
+        });
+
+        it("T2: wrong workflowId rejected", async function () {
+            await receiver.connect(deployer).setExpectedWorkflowId(workflowId);
+            const wrongId = ethers.id("wrong-workflow");
+            const meta = makeMetadata(workflowOwner, wrongId);
+            const report = makeReport((await currentTs()) - 10n);
+            await expect(
+                receiver.connect(fwd).onReport(meta, report)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedWorkflow")
+             .withArgs(workflowOwner, wrongId);
+        });
+
+        it("T3: correct metadata accepted, reportCount increments", async function () {
+            await receiver.connect(deployer).setExpectedWorkflowOwner(workflowOwner);
+            await receiver.connect(deployer).setExpectedWorkflowId(workflowId);
+            const meta = makeMetadata(workflowOwner, workflowId);
+            const report = makeReport((await currentTs()) - 10n);
+            await receiver.connect(fwd).onReport(meta, report);
+            expect(await receiver.reportCount()).to.equal(1n);
+        });
+
+        it("T4: both checks unset (zero) — any metadata accepted", async function () {
+            const report = makeReport((await currentTs()) - 10n);
+            await receiver.connect(fwd).onReport("0x", report);
+            expect(await receiver.reportCount()).to.equal(1n);
+        });
+
+        it("T5: non-forwarder rejected before metadata check", async function () {
+            await receiver.connect(deployer).setExpectedWorkflowOwner(workflowOwner);
+            const meta = makeMetadata(workflowOwner, workflowId);
+            const report = makeReport((await currentTs()) - 10n);
+            await expect(
+                receiver.connect(other).onReport(meta, report)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedForwarder")
+             .withArgs(other.address);
+        });
+
+        it("T6: metadata shorter than 62 bytes reverts InvalidMetadata", async function () {
+            await receiver.connect(deployer).setExpectedWorkflowOwner(workflowOwner);
+            const shortMeta = "0x" + "aa".repeat(61); // 61 bytes < 62
+            const report = makeReport((await currentTs()) - 10n);
+            await expect(
+                receiver.connect(fwd).onReport(shortMeta, report)
+            ).to.be.revertedWithCustomError(receiver, "InvalidMetadata")
+             .withArgs(61n);
+        });
+
+        it("non-admin cannot call setExpectedWorkflowOwner", async function () {
+            await expect(
+                receiver.connect(other).setExpectedWorkflowOwner(workflowOwner)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedAdmin")
+             .withArgs(other.address);
+        });
+
+        it("non-admin cannot call setExpectedWorkflowId", async function () {
+            await expect(
+                receiver.connect(other).setExpectedWorkflowId(workflowId)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedAdmin")
+             .withArgs(other.address);
+        });
+
+        it("non-admin cannot call transferAdmin", async function () {
+            await expect(
+                receiver.connect(other).transferAdmin(other.address)
+            ).to.be.revertedWithCustomError(receiver, "UnauthorizedAdmin")
+             .withArgs(other.address);
+        });
+
+        it("transferAdmin to zero address reverts ZeroAddress", async function () {
+            await expect(
+                receiver.connect(deployer).transferAdmin(ethers.ZeroAddress)
+            ).to.be.revertedWithCustomError(receiver, "ZeroAddress");
+        });
+    });
 });

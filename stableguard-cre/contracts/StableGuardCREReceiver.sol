@@ -99,6 +99,10 @@ contract StableGuardCREReceiver {
     uint256 public lastAcceptedObservedAt;
     uint256 public reportCount;
 
+    address public admin;
+    address public expectedWorkflowOwner;   // zero = skip check
+    bytes32 public expectedWorkflowId;      // zero = skip check
+
     // Per-coin hold tracking for lineage proof on resumeProtectionTracking
     mapping(address => bytes32) private _coinHoldId;   // coin => active holdId (0 = none)
     mapping(address => bytes32) private _lastEventId;  // coin => last non-zero eventId seen
@@ -136,11 +140,18 @@ contract StableGuardCREReceiver {
     event VaultUnpauseFailed(address indexed vault, bytes32 indexed symbol, bytes reason);
     event RegistryCallbackFailed(bytes32 indexed eventId, address indexed coin, bytes reason);
     event RecoveryResumeFailed(address indexed coin, bytes reason);
+    event AdminChanged(address indexed previousAdmin, address indexed newAdmin);
+    event WorkflowOwnerSet(address indexed previousOwner, address indexed newOwner);
+    event WorkflowIdSet(bytes32 indexed previousId, bytes32 indexed newId);
 
     error UnauthorizedForwarder(address caller);
     error ReportTooOld(uint256 observedAt, uint256 blockTimestamp, uint256 maxAge);
     error StaleReport(uint256 observedAt, uint256 lastAccepted);
     error DuplicateCoin(address coin);
+    error UnauthorizedAdmin(address caller);
+    error UnauthorizedWorkflow(address workflowOwner, bytes32 workflowId);
+    error InvalidMetadata(uint256 length);
+    error ZeroAddress();
 
     constructor(
         address _forwarder,
@@ -158,11 +169,52 @@ contract StableGuardCREReceiver {
         localChainSelector  = _localChainSelector;
         holdLedger          = IProtectionHoldLedger(_holdLedger);
         maxReportAge        = _maxReportAge;
+        admin               = msg.sender;
+    }
+
+    function transferAdmin(address newAdmin) external {
+        if (msg.sender != admin) revert UnauthorizedAdmin(msg.sender);
+        if (newAdmin == address(0)) revert ZeroAddress();
+        emit AdminChanged(admin, newAdmin);
+        admin = newAdmin;
+    }
+
+    function setExpectedWorkflowOwner(address newOwner) external {
+        if (msg.sender != admin) revert UnauthorizedAdmin(msg.sender);
+        emit WorkflowOwnerSet(expectedWorkflowOwner, newOwner);
+        expectedWorkflowOwner = newOwner;
+    }
+
+    function setExpectedWorkflowId(bytes32 newId) external {
+        if (msg.sender != admin) revert UnauthorizedAdmin(msg.sender);
+        emit WorkflowIdSet(expectedWorkflowId, newId);
+        expectedWorkflowId = newId;
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
         if (msg.sender != forwarder) revert UnauthorizedForwarder(msg.sender);
-        // metadata intentionally unused — forwarder check is the access control boundary
+
+        // Workflow identity guard — Chainlink ReceiverTemplate pattern.
+        // Checks are skipped while the corresponding expected value is zero,
+        // so existing deployments keep working until the admin sets them.
+        {
+            address _expOwner = expectedWorkflowOwner;
+            bytes32 _expId    = expectedWorkflowId;
+            if (_expOwner != address(0) || _expId != bytes32(0)) {
+                if (metadata.length < 62) revert InvalidMetadata(metadata.length);
+                bytes memory md = metadata;
+                bytes32 wfId;
+                address wfOwner;
+                assembly {
+                    wfId    := mload(add(md, 32))
+                    wfOwner := shr(96, mload(add(md, 74)))
+                }
+                if (_expOwner != address(0) && wfOwner != _expOwner)
+                    revert UnauthorizedWorkflow(wfOwner, wfId);
+                if (_expId != bytes32(0) && wfId != _expId)
+                    revert UnauthorizedWorkflow(wfOwner, wfId);
+            }
+        }
 
         (
             address[] memory coins,
