@@ -344,16 +344,21 @@ describe("ExposureRegistry binding", function () {
             );
         });
 
-        it("reverts StaleReport when the same observedAt is submitted twice", async function () {
+        it("stale coin is skipped with CoinReportSkippedStale when the same observedAt is submitted twice", async function () {
             const ts = BigInt(await time.latest()) - 5n;
             const report = encodeReport([coinA.address], [0], 0, ts);
-            // First submission: passes all guards (eventRegistry.processReport may fail
-            // because receiverShort is not the controller, but onReport does not revert).
+            // First submission: accepted; sets lastAcceptedObservedAt[coinA] = ts
             await receiverShort.connect(forwarder).onReport("0x", report);
-            // Second submission: same observedAt → StaleReport
-            await expect(receiverShort.connect(forwarder).onReport("0x", report))
-                .to.be.revertedWithCustomError(receiverShort, "StaleReport")
-                .withArgs(ts, ts);
+            // Second submission: same observedAt → coin skipped, event emitted, report succeeds
+            const tx = await receiverShort.connect(forwarder).onReport("0x", report);
+            const receipt = await tx.wait();
+            const skipped = receipt.logs
+                .map(l => { try { return receiverShort.interface.parseLog(l); } catch { return null; } })
+                .filter(e => e && e.name === "CoinReportSkippedStale");
+            expect(skipped.length).to.equal(1);
+            expect(skipped[0].args.coin).to.equal(coinA.address);
+            expect(skipped[0].args.observedAt).to.equal(ts);
+            expect(skipped[0].args.lastAccepted).to.equal(ts);
         });
 
         it("reverts ReportTooOld when observedAt is older than maxReportAge", async function () {
@@ -394,16 +399,16 @@ describe("ExposureRegistry binding", function () {
             const ts1 = now - 10n;
             const ts2 = ts1 + 1n;
 
-            // First valid report: sets lastAcceptedObservedAt = ts1
+            // First valid report: sets lastAcceptedObservedAt[coinA] = ts1
             await receiverShort.connect(forwarder).onReport(
                 "0x", encodeReport([coinA.address], [0], 0, ts1)
             );
-            expect(await receiverShort.lastAcceptedObservedAt()).to.equal(ts1);
+            expect(await receiverShort.lastAcceptedObservedAt(coinA.address)).to.equal(ts1);
 
             // Attempt a DuplicateCoin report with ts2: reverts before any state update.
             // ts2 is a valid timestamp (not too old, not future, not stale relative to ts1)
-            // so the only reason for revert is the duplicate coin — proving the timestamp
-            // slot is open and would have been consumed had the payload been valid.
+            // so the only reason for revert is the duplicate coin — proving the per-coin
+            // timestamp slot is open and would have been consumed had the payload been valid.
             await expect(
                 receiverShort.connect(forwarder).onReport(
                     "0x",
@@ -411,14 +416,14 @@ describe("ExposureRegistry binding", function () {
                 )
             ).to.be.revertedWithCustomError(receiverShort, "DuplicateCoin");
 
-            // lastAcceptedObservedAt must still be ts1 — the rejected report had no lasting effect.
-            expect(await receiverShort.lastAcceptedObservedAt()).to.equal(ts1);
+            // lastAcceptedObservedAt[coinA] must still be ts1 — the rejected report had no lasting effect.
+            expect(await receiverShort.lastAcceptedObservedAt(coinA.address)).to.equal(ts1);
 
             // A valid report with ts2 must now succeed — the slot was not consumed by the bad attempt.
             await receiverShort.connect(forwarder).onReport(
                 "0x", encodeReport([coinA.address], [0], 0, ts2)
             );
-            expect(await receiverShort.lastAcceptedObservedAt()).to.equal(ts2);
+            expect(await receiverShort.lastAcceptedObservedAt(coinA.address)).to.equal(ts2);
         });
     });
 });

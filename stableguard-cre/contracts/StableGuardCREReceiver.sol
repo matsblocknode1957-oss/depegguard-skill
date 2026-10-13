@@ -29,6 +29,7 @@ interface IDepegEventRegistry {
         external returns (bytes32 eventId, State resultState);
     function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
     function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
+    function getDestinationState(bytes32 eventId, uint256 destIndex) external view returns (DestState);
     function resumeProtectionTracking(
         address coin,
         bytes32 evidenceRoot,
@@ -80,9 +81,10 @@ interface IProtectionHoldLedger {
  *                     override if this receiver becomes compromised or unresponsive)
  *   maxReportAge      Maximum seconds between a report's observedAt and block.timestamp.
  *                     Reports with observedAt in the future or older than this window are
- *                     rejected (ReportTooOld).  Reports whose observedAt is not strictly
- *                     greater than the last accepted observedAt are also rejected (StaleReport),
- *                     preventing replay of previously processed reports.  Suggested: 3600.
+ *                     rejected (ReportTooOld).  Per-coin replay protection: each coin's
+ *                     observedAt must exceed lastAcceptedObservedAt[coin]; stale coins emit
+ *                     CoinReportSkippedStale and are skipped without failing the whole report.
+ *                     Suggested: 3600.
  */
 contract StableGuardCREReceiver {
     address                public immutable forwarder;
@@ -96,7 +98,7 @@ contract StableGuardCREReceiver {
     uint8   public lastCompositeScore;
     uint8   public lastMarketStress;
     uint256 public lastObservedAt;
-    uint256 public lastAcceptedObservedAt;
+    mapping(address => uint256) public lastAcceptedObservedAt;
     uint256 public reportCount;
 
     address public admin;
@@ -130,6 +132,8 @@ contract StableGuardCREReceiver {
         uint8   signalLevel
     );
 
+    event CoinReportSkippedStale(address indexed coin, uint256 observedAt, uint256 lastAccepted);
+
     // TODO (ops): index and alert on this event before production deployment.
     // A forgotten ExposureRegistry.registerExposure() call will silently skip
     // the pause for that coin — this event is the only on-chain signal of that gap.
@@ -146,7 +150,6 @@ contract StableGuardCREReceiver {
 
     error UnauthorizedForwarder(address caller);
     error ReportTooOld(uint256 observedAt, uint256 blockTimestamp, uint256 maxAge);
-    error StaleReport(uint256 observedAt, uint256 lastAccepted);
     error DuplicateCoin(address coin);
     error UnauthorizedAdmin(address caller);
     error UnauthorizedWorkflow(address workflowOwner, bytes32 workflowId);
@@ -237,10 +240,6 @@ contract StableGuardCREReceiver {
         // Freshness: reject reports from the future or older than maxReportAge.
         if (observedAt > block.timestamp || block.timestamp - observedAt > maxReportAge)
             revert ReportTooOld(observedAt, block.timestamp, maxReportAge);
-        // Replay: reject reports whose observedAt is not strictly newer than the
-        // last accepted report — prevents resubmission of any captured report.
-        if (observedAt <= lastAcceptedObservedAt)
-            revert StaleReport(observedAt, lastAcceptedObservedAt);
         // Duplicate-asset: reject reports listing the same coin address twice,
         // which would process one signal as two independent depeg events.
         for (uint256 i = 0; i < coins.length; i++) {
@@ -248,7 +247,6 @@ contract StableGuardCREReceiver {
                 if (coins[i] == coins[j]) revert DuplicateCoin(coins[i]);
             }
         }
-        lastAcceptedObservedAt = observedAt;
 
         uint256 idx = reportCount++;
         lastCompositeScore = compositeScore;
@@ -274,6 +272,12 @@ contract StableGuardCREReceiver {
             address coin  = coins[i];
             uint8   level = signalLevels[i];
 
+            if (observedAt <= lastAcceptedObservedAt[coin]) {
+                emit CoinReportSkippedStale(coin, observedAt, lastAcceptedObservedAt[coin]);
+                continue;
+            }
+            lastAcceptedObservedAt[coin] = observedAt;
+
             // Call 1: advance state machine; skip this coin on any registry failure
             bytes32 eventId;
             IDepegEventRegistry.State newState;
@@ -296,7 +300,8 @@ contract StableGuardCREReceiver {
             // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
             // and on subsequent cycles until the destination slot is settled.
             if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
-                if (IPausable(vault).paused() || IPausable(vault).depositsFrozen()) {
+                bool vaultFrozen = IPausable(vault).paused() || IPausable(vault).depositsFrozen();
+                if (vaultFrozen && (_coinHoldId[coin] != bytes32(0) || holdLedger.activeHoldCount(vault) == 0)) {
                     bytes32 hId = _coinHoldId[coin];
                     bool holdReleased = false;
                     bool vaultFullyReleased = false;
@@ -377,6 +382,13 @@ contract StableGuardCREReceiver {
                     }
                     // holdReleased && !unpaused: skip callback — destination stays PENDING so
                     // the event remains in RECOVERY_PENDING for the next cycle's retry path.
+                } else if (!vaultFrozen && _coinHoldId[coin] == bytes32(0)) {
+                    if (eventRegistry.getDestinationState(eventId, 0) == IDepegEventRegistry.DestState.PENDING) {
+                        try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
+                        catch (bytes memory reason) {
+                            emit RegistryCallbackFailed(eventId, coin, reason);
+                        }
+                    }
                 }
                 // Permissionless; silent if cooldown not yet elapsed
                 try eventRegistry.finalizeRecovery(eventId) { } catch { }

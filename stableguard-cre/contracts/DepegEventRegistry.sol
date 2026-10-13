@@ -607,6 +607,12 @@ contract DepegEventRegistry {
         return _events[eventId];
     }
 
+    function getDestinationState(bytes32 eventId, uint256 destIndex) external view returns (DestState) {
+        DepegEvent storage ev = _events[eventId];
+        if (ev.coin == address(0) || destIndex >= ev.destinations.length) return DestState.PENDING;
+        return ev.destinations[destIndex].state;
+    }
+
     function getActiveEventId(address coin) external view returns (bytes32) {
         return activeEventId[keccak256(abi.encode(coin))];
     }
