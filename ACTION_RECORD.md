@@ -272,39 +272,50 @@ event via TTL expiry.
 
 The state machine supports recovery: `PROTECTED → initiateRecovery() →
 RECOVERY_PENDING → NORMAL`. The `recoveryCooldown` timer and the
-`finalizeRecovery()` permissionless helper are implemented and tested. What
-is not documented:
+`finalizeRecovery()` permissionless helper are implemented and tested. The
+four open questions from earlier review have been resolved as follows.
 
-- Who is authorised to call `initiateRecovery()`.
-- What off-chain condition (price returning to peg for how long? which
-  oracle? which threshold?) triggers the recovery call.
-- Whether recovery destinations mirror protection destinations or can differ.
+**Default path — fully automatic, no human involved:**
+Recovery is condition-triggered via `stableCount` reaching `stabilityWindow`
+(built in this branch). No operator key, no signatory, no manual
+`initiateRecovery()` call is needed for the standard case. This directly
+resolves the original questions about who authorises recovery, what triggers
+it, and whether there is an SLA — there is no human waiting period at all in
+the default path.
 
-**Open question for reviewer / operator — requires an explicit answer before
-production:**
+**Override authority belongs entirely to the customer, never to StableGuard:**
+StableGuard builds the override *mechanism*; the customer's own treasury/DAO
+governance holds the actual keys and authority. StableGuard is never a signer
+on any customer's override multisig and never has unilateral power to force a
+pause or force a recovery on a customer's vault.
 
-If `initiateRecovery()` is never called, the vault stays paused until the
-event's `eventTTL` elapses. At that point `settleExpired()` (permissionless)
-or the next `processReport()` call will terminate the event as
-`State.EXPIRED`. There is no automatic unpause tied to event expiry — the
-vault remains paused indefinitely after the event closes. The on-chain
-record shows EXPIRED rather than NORMAL, and no recovery path is recorded.
+**Two distinct override paths, treated asymmetrically:**
 
-This is the worst-case availability failure: a vault locked out permanently
-with no on-chain recovery trigger and no record of what resolved the
-incident. The following questions must be answered before production:
+The two overrides carry different risk profiles and are intentionally held to
+different bars.
 
-1. *Who is authorised to call `initiateRecovery()`? Is it the same
-   operator key that controls `StableGuardCREReceiver`, or a separate
-   governance multisig?*
-2. *What on-chain or off-chain condition triggers the recovery call —
-   price back within the soft band for N consecutive reports? A governance
-   vote? A manual operator decision?*
-3. *What is the maximum acceptable time a vault may remain paused before
-   recovery must begin? Is there an SLA?*
-4. *If `eventTTL` expires while the vault is still paused, is the vault
-   manually unpaused out-of-band, and if so by whom and how is that action
-   recorded?*
+1. **Delay override** (hold locked past when the algorithm would reopen): low
+   bar. Any single authorised signer from the customer's own multisig can
+   invoke this. Pure downside protection — the only cost of misuse is
+   unnecessary caution, not risk to funds. Use case: adverse news about an
+   issuer has not yet shown up in price data and the customer wants to wait
+   before reopening even though `stableCount` has been met.
+
+2. **Early-unlock override** (reopen before the algorithm's own conditions are
+   met): higher bar. Requires the customer's own multisig threshold (e.g.
+   2-of-3, whatever the customer has configured — StableGuard does not set
+   this). The on-chain call must include a recorded justification string,
+   creating a permanent audit trail of why a human chose to override the
+   automatic safety check. This is deliberately harder to invoke than the
+   delay override, since forcing an early unlock reintroduces exactly the kind
+   of manual-trust risk the automatic system was built to remove.
+
+**TTL expiry while paused:**
+Unchanged from what is already built — `resumeProtectionTracking()`
+automatically re-arms tracking if `eventTTL` expires before `stableCount`
+reaches `stabilityWindow`, so a vault can never be permanently stuck with
+nothing tracking it. No automatic unpause is tied to the TTL clock; recovery
+remains condition-based, not calendar-based.
 
 ---
 

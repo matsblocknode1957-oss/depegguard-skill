@@ -10,6 +10,7 @@ const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 const WATCH_THRESHOLD    = 1;
 const CONFIRMED_THRESHOLD = 2;
+const STABILITY_WINDOW   = 3;        // consecutive stable reports for auto-recovery (illustrative)
 const EVENT_TTL          = 86_400;   // 1 day
 const PENDING_TTL        = 3_600;    // 1 hour
 const RECOVERY_COOLDOWN  = 1_800;    // 30 min
@@ -52,6 +53,7 @@ describe("DepegEventRegistry", function () {
             controller.address,
             WATCH_THRESHOLD,
             CONFIRMED_THRESHOLD,
+            STABILITY_WINDOW,
             EVENT_TTL,
             PENDING_TTL,
             RECOVERY_COOLDOWN
@@ -809,6 +811,192 @@ describe("DepegEventRegistry", function () {
             await expect(
                 registry.connect(controller).destinationCallback(id, 0, DS.COMPLETE)
             ).to.be.revertedWithCustomError(registry, "AlreadyTerminal");
+        });
+    });
+
+    // ── resumeProtectionTracking ──────────────────────────────────────────────
+
+    describe("resumeProtectionTracking", function () {
+        it("creates a PROTECTED event with COMPLETE destinations when no active event", async function () {
+            await registry.connect(controller).resumeProtectionTracking(
+                coinA.address,
+                evidence(coinA.address, 0),
+                [dest(1, other.address)]
+            );
+            const id = await activeId(coinA.address);
+            expect(id).to.not.equal(ethers.ZeroHash);
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+            expect(await destStateOf(id, 0)).to.equal(DS.COMPLETE);
+        });
+
+        it("emits RecoveryTrackingResumed", async function () {
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address,
+                    evidence(coinA.address, 0),
+                    [dest(1, other.address)]
+                )
+            ).to.emit(registry, "RecoveryTrackingResumed")
+             .withArgs(anyValue, coinA.address, 1n);
+        });
+
+        it("reverts from non-controller", async function () {
+            await expect(
+                registry.connect(other).resumeProtectionTracking(
+                    coinA.address,
+                    evidence(coinA.address, 0),
+                    [dest(1, other.address)]
+                )
+            ).to.be.revertedWithCustomError(registry, "Unauthorized");
+        });
+
+        it("reverts with empty destinations", async function () {
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address,
+                    evidence(coinA.address, 0),
+                    []
+                )
+            ).to.be.revertedWithCustomError(registry, "NoDestinations");
+        });
+
+        it("reverts when active non-terminal event exists", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address,
+                    evidence(coinA.address, 0),
+                    [dest(1, other.address)]
+                )
+            ).to.be.revertedWithCustomError(registry, "InvalidTransition");
+        });
+
+        it("succeeds after prior event reaches NORMAL (terminal)", async function () {
+            await report(coinA.address, WATCH_THRESHOLD);
+            const firstId = await activeId(coinA.address);
+            await report(coinA.address, 0); // G3: WATCH → NORMAL
+            expect(await stateOf(firstId)).to.equal(S.NORMAL);
+
+            await expect(
+                registry.connect(controller).resumeProtectionTracking(
+                    coinA.address,
+                    evidence(coinA.address, 0),
+                    [dest(1, other.address)]
+                )
+            ).to.emit(registry, "RecoveryTrackingResumed");
+        });
+
+        it("auto-recovery fires from resumed event after stabilityWindow stable reports", async function () {
+            await registry.connect(controller).resumeProtectionTracking(
+                coinA.address,
+                evidence(coinA.address, 0),
+                [dest(1, other.address), dest(2, other.address)]
+            );
+            const id = await activeId(coinA.address);
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+
+            for (let i = 0; i < STABILITY_WINDOW - 1; i++) {
+                await report(coinA.address, 0);
+                expect(await stateOf(id)).to.equal(S.PROTECTED);
+            }
+
+            await expect(report(coinA.address, 0))
+                .to.emit(registry, "EventAdvanced")
+                .withArgs(id, coinA.address, S.PROTECTED, S.RECOVERY_PENDING)
+                .and.to.emit(registry, "RecoveryInitiated")
+                .withArgs(id, coinA.address, 2n);
+
+            expect(await stateOf(id)).to.equal(S.RECOVERY_PENDING);
+            expect(await destStateOf(id, 0)).to.equal(DS.PENDING);
+            expect(await destStateOf(id, 1)).to.equal(DS.PENDING);
+        });
+    });
+
+    // ── GA: auto-recovery ─────────────────────────────────────────────────────
+
+    describe("GA – auto-recovery (stabilityWindow consecutive stable reports)", function () {
+        it("fires RECOVERY_PENDING after stabilityWindow stable reports while PROTECTED", async function () {
+            const id = await toProtected(coinA.address, 2);
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+
+            // stabilityWindow - 1 stable reports: not yet
+            for (let i = 0; i < STABILITY_WINDOW - 1; i++) {
+                await report(coinA.address, 0);
+                expect(await stateOf(id)).to.equal(S.PROTECTED);
+            }
+
+            // Nth stable report: triggers auto-recovery
+            await expect(report(coinA.address, 0))
+                .to.emit(registry, "EventAdvanced")
+                .withArgs(id, coinA.address, S.PROTECTED, S.RECOVERY_PENDING)
+                .and.to.emit(registry, "RecoveryInitiated")
+                .withArgs(id, coinA.address, 2n);
+
+            expect(await stateOf(id)).to.equal(S.RECOVERY_PENDING);
+
+            // All destination slots reset to PENDING for recovery delivery
+            expect(await destStateOf(id, 0)).to.equal(DS.PENDING);
+            expect(await destStateOf(id, 1)).to.equal(DS.PENDING);
+        });
+
+        it("non-stable report hard-resets stableCount — recovery does not fire prematurely", async function () {
+            const id = await toProtected(coinA.address, 2);
+
+            // stabilityWindow - 1 stable reports
+            for (let i = 0; i < STABILITY_WINDOW - 1; i++) {
+                await report(coinA.address, 0);
+            }
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+
+            // Non-stable: hard reset
+            await report(coinA.address, WATCH_THRESHOLD);
+            expect(await stateOf(id)).to.equal(S.PROTECTED);
+
+            // stabilityWindow - 1 stable reports again — still not enough
+            for (let i = 0; i < STABILITY_WINDOW - 1; i++) {
+                await report(coinA.address, 0);
+                expect(await stateOf(id)).to.equal(S.PROTECTED);
+            }
+
+            // Now the Nth stable since reset fires
+            await report(coinA.address, 0);
+            expect(await stateOf(id)).to.equal(S.RECOVERY_PENDING);
+        });
+
+        it("event TTL in processReport takes priority over auto-recovery", async function () {
+            const id = await toProtected(coinA.address, 2);
+
+            // One stable report (stableCount = 1)
+            await report(coinA.address, 0);
+
+            // Advance past TTL
+            await time.increase(EVENT_TTL + 1);
+
+            // Next processReport: TTL check fires first, terminates as EXPIRED
+            await expect(report(coinA.address, 0))
+                .to.emit(registry, "EventTerminated")
+                .withArgs(id, coinA.address, S.EXPIRED);
+
+            expect(await stateOf(id)).to.equal(S.EXPIRED);
+            expect(await activeId(coinA.address)).to.equal(ethers.ZeroHash);
+        });
+
+        it("auto-recovery proceeds through RECOVERY_PENDING to NORMAL via DC + cooldown", async function () {
+            const id = await toProtected(coinA.address, 2);
+
+            // Trigger auto-recovery
+            for (let i = 0; i < STABILITY_WINDOW; i++) {
+                await report(coinA.address, 0);
+            }
+            expect(await stateOf(id)).to.equal(S.RECOVERY_PENDING);
+
+            // Original destination slots were reset to PENDING; complete them after cooldown
+            await time.increase(RECOVERY_COOLDOWN);
+            await registry.connect(controller).destinationCallback(id, 0, DS.COMPLETE);
+            await registry.connect(controller).destinationCallback(id, 1, DS.COMPLETE);
+
+            expect(await stateOf(id)).to.equal(S.NORMAL);
+            expect(await activeId(coinA.address)).to.equal(ethers.ZeroHash);
         });
     });
 

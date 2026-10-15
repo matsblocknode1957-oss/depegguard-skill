@@ -11,6 +11,7 @@ const LOCAL_CHAIN_SELECTOR = 1n;
 // (G0 creates WATCH, _applyScoreTransitions immediately advances via G2 — one transaction).
 const WATCH_THRESHOLD      = 1;
 const CONFIRMED_THRESHOLD  = 2;
+const STABILITY_WINDOW     = 3;       // matches depeg-event-registry.test.js fixture
 const EVENT_TTL            = 86400n;  // 24 h
 const PENDING_TTL          = 3600n;   // 1 h
 const RECOVERY_COOLDOWN    = 900n;    // 15 min
@@ -37,6 +38,13 @@ function addrToBytes32(addr) {
     return ethers.zeroPadValue(addr, 32);
 }
 
+const S = {
+    WATCH: 0, CONFIRMED_DEPEG: 1,
+    PROTECTION_PENDING: 2, PARTIALLY_PROTECTED: 3, PROTECTED: 4,
+    RECOVERY_PENDING: 5, PARTIALLY_RECOVERED: 6,
+    NORMAL: 7, EXPIRED: 8, FAILED: 9, SUPERSEDED: 10,
+};
+
 describe("ExposureRegistry binding", function () {
     let receiver, registry, eventRegistry, vault;
     let forwarder, admin, coinA, coinB;
@@ -56,6 +64,7 @@ describe("ExposureRegistry binding", function () {
             admin.address,          // initial controller = deployer (admin signer)
             WATCH_THRESHOLD,
             CONFIRMED_THRESHOLD,
+            STABILITY_WINDOW,
             EVENT_TTL,
             PENDING_TTL,
             RECOVERY_COOLDOWN
@@ -168,6 +177,82 @@ describe("ExposureRegistry binding", function () {
             .to.emit(receiver, "VaultExposureMissing")
             .withArgs(vaultAddr, symA);
         expect(await vault.paused()).to.equal(false);
+    });
+
+    // Helpers for scenario test
+    async function eventState(eventId) {
+        return Number((await eventRegistry.getDepegEvent(eventId)).state);
+    }
+    async function activeEventId(coin) {
+        return eventRegistry.getActiveEventId(coin);
+    }
+
+    // Encodes a report with all coins at signalLevel=0 (stable, compositeScore=0)
+    function stableReport(coins) {
+        return encodeReport(coins, coins.map(() => 0), 0);
+    }
+
+    it("receiver auto-resumes tracking and reaches NORMAL when event expires with vault still paused", async function () {
+        const vaultAddr = await vault.getAddress();
+        const symA = addrToBytes32(coinA.address);
+        await registry.connect(admin).registerExposure(vaultAddr, symA);
+
+        // First alert: CONFIRMED_DEPEG → vault paused → PROTECTED (1 dest, COMPLETE)
+        const alert = encodeReport([coinA.address], [2], 2);
+        await receiver.connect(forwarder).onReport("0x", alert);
+        expect(await vault.paused()).to.equal(true);
+        const firstId = await activeEventId(coinA.address);
+        expect(await eventState(firstId)).to.equal(S.PROTECTED);
+
+        // One stable report: stableCount = 1 (STABILITY_WINDOW = 3, not yet)
+        const stable = stableReport([coinA.address]);
+        await receiver.connect(forwarder).onReport("0x", stable);
+        expect(await vault.paused()).to.equal(true);
+        expect(await activeEventId(coinA.address)).to.equal(firstId); // same event
+
+        // Advance past eventTTL
+        await time.increase(EVENT_TTL + 1n);
+
+        // First stable report after TTL: G13 fires, first event → EXPIRED.
+        // Receiver sees (firstId, EXPIRED) — not CONFIRMED_DEPEG, not RECOVERY_PENDING,
+        // eventId != bytes32(0) — so no action taken. Vault stays paused.
+        await receiver.connect(forwarder).onReport("0x", stable);
+        expect(await eventState(firstId)).to.equal(S.EXPIRED);
+        expect(await activeEventId(coinA.address)).to.equal(ethers.ZeroHash);
+        expect(await vault.paused()).to.equal(true);
+
+        // KEY REPORT: processReport returns (bytes32(0), NORMAL) — no active event,
+        // stable score. Receiver detects vault.paused() = true and calls
+        // resumeProtectionTracking → fresh PROTECTED event with stableCount = 0.
+        await expect(receiver.connect(forwarder).onReport("0x", stable))
+            .to.emit(eventRegistry, "RecoveryTrackingResumed");
+
+        const continuationId = await activeEventId(coinA.address);
+        expect(continuationId).to.not.equal(ethers.ZeroHash);
+        expect(continuationId).to.not.equal(firstId);
+        expect(await eventState(continuationId)).to.equal(S.PROTECTED);
+        expect(await vault.paused()).to.equal(true); // still paused — auto-recovery not fired yet
+
+        // STABILITY_WINDOW more stable reports: stableCount → 1, 2, then fires on 3
+        // (the resumeProtectionTracking call itself doesn't increment stableCount)
+        for (let i = 0; i < STABILITY_WINDOW - 1; i++) {
+            await receiver.connect(forwarder).onReport("0x", stable);
+            expect(await vault.paused()).to.equal(true);
+        }
+
+        // Final stable report: stableCount reaches STABILITY_WINDOW → _applyAutoRecovery
+        // fires → RECOVERY_PENDING. Receiver: vault.paused() = true → vault.unpause()
+        // → destinationCallback(0, COMPLETE). Cooldown not yet elapsed → stays RECOVERY_PENDING.
+        await receiver.connect(forwarder).onReport("0x", stable);
+        expect(await vault.paused()).to.equal(false);
+        expect(await eventState(continuationId)).to.equal(S.RECOVERY_PENDING);
+
+        // Advance past recoveryCooldown → finalizeRecovery() on next report succeeds → NORMAL
+        await time.increase(RECOVERY_COOLDOWN + 1n);
+        await receiver.connect(forwarder).onReport("0x", stable);
+
+        expect(await eventState(continuationId)).to.equal(S.NORMAL);
+        expect(await activeEventId(coinA.address)).to.equal(ethers.ZeroHash);
     });
 
     it("skips unregistered coin but still pauses for registered coin in same report", async function () {
