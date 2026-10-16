@@ -349,3 +349,66 @@ The `classifySignal` thresholds in `stableguard-cre/depeg-monitor/main.ts`
 (20 / 50 / 100 bps → WATCH / HEDGE / EXIT) are the confirmed production
 values — they are hardcoded in the CRE workflow and not constructor
 parameters.
+
+---
+
+## 5. Live protection event — 2 Oct 2026
+
+The first successful on-chain protection fired on Arbitrum Sepolia shortly after
+2 Oct 2026 22:14 BST. It is documented in the README (commit `66fdc56`, 4 Oct 2026)
+as the "live protection transaction (simulated 3% USDC depeg, testnet)".
+
+| field | value |
+|---|---|
+| Date | 2 Oct 2026 (exact block timestamp: TBC — see explorer link below) |
+| Network | Arbitrum Sepolia (chain selector `3478487238524512106`, chain ID 421614) |
+| Coin | USDC (`0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` on Arb Sepolia) |
+| Signal | CRITICAL (level 3) — 300 bps simulated depeg via `stubScenario: "depeg"` in `config.arbitrum-staging.json` |
+| Receiver | `StableGuardCREReceiver` `0xac83a85Ee4dF1FfF44DFdEF055e95Db4886a9aD8` |
+| Vault | `StableGuardVault` `0x86602cDeC52Df65Bc8D66528De429EB11A9E0497` |
+
+**What triggered it:**
+
+The CRE arbitrum-staging workflow (`config.arbitrum-staging.json`, 30-second cron,
+`chainSelectorName: "ethereum-testnet-sepolia-arbitrum-1"`) was running with
+`stubScenario: "depeg"`, which applies `STUB_DEPEG_USDC_OFFSET = −30,000,000,000,000,000`
+raw price units (−300 bps) to USDC on every tick. `classifySignal(300)` returns CRITICAL
+(level 3); with `watchThreshold = 1` and `confirmedThreshold = 2` this reaches
+`CONFIRMED_DEPEG` on the second consecutive tick (~30 s after the first).
+
+The workflow had been deployed to the CRE private registry (commit `c98b52e`, 20:02 BST)
+but was not routing correctly: the previous receiver (`0x8A3De0095Eb8741f89d3a3BF71DEA1d4857a9bbd`)
+was missing `supportsInterface(IReceiver_ID = 0x805f2132)`, causing the Chainlink
+KeystoneForwarder to mark it `invalidReceiver` and skip `onReport()`. Commit `d420a3a`
+(22:03 BST) added ERC-165 support and redeployed the receiver to `0xac83a85...`; commit
+`43d93bc` (22:14 BST) updated both arbitrum workflow configs to point at the new address.
+The first `onReport()` that actually executed was the 30-second tick after 22:14 BST.
+
+**Call sequence (§ 1.2 and `StableGuardCREReceiver` NatSpec):**
+
+Tick 1 (~22:14 BST) — creates WATCH event: `processReport(USDC, 3, evidenceRoot)`, score 3
+≥ `watchThreshold` 1 → `_create()` → `State.WATCH`, emits `EventCreated`.
+Transaction hash of this tick: **TBC** (check Arbiscan for the tx immediately before the
+protection tx on receiver `0xac83a85...`).
+
+Tick 2 (~22:15 BST) — protection fires (this is the recorded transaction):
+
+1. `processReport(USDC, 3, evidenceRoot)` — score 3 ≥ `confirmedThreshold` 2 → `CONFIRMED_DEPEG`, emits `EventAdvanced`
+2. `ExposureRegistry.isExposed(vault, usdcKey)` → `true`
+3. `DepegEventRegistry.initiateProtection(eventId, [{localChainSelector, vault}])` → `PROTECTION_PENDING`
+4. `ProtectionHoldLedger.acquire()` at `0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b` — hold claimed
+5. `StableGuardVault.pause()` at `0x86602cDeC52Df65Bc8D66528De429EB11A9E0497` — vault frozen
+6. `DepegEventRegistry.destinationCallback(eventId, 0, COMPLETE)` → `PROTECTED`
+
+**Transaction hashes:**
+
+| event | tx hash | explorer |
+|---|---|---|
+| Protection (vault paused → PROTECTED) | `0x2bce3db20f25841c7d0570440ffd22e05542842302286da790d6c9591f1cbc6c` | [Arbiscan](https://sepolia.arbiscan.io/tx/0x2bce3db20f25841c7d0570440ffd22e05542842302286da790d6c9591f1cbc6c) |
+| Preceding WATCH tick | TBC | TBC |
+| Recovery / unpause | TBC | TBC |
+
+**TBC — fill in from the block explorer:**
+- Exact block timestamp of the protection tx
+- Hash of the preceding WATCH-creating tick (look up tx history on the receiver address)
+- Whether the vault was subsequently unpaused, and if so the recovery tx hash
