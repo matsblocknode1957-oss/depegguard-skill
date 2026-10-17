@@ -360,7 +360,7 @@ as the "live protection transaction (simulated 3% USDC depeg, testnet)".
 
 | field | value |
 |---|---|
-| Date | 2 Oct 2026 (exact block timestamp: TBC — see explorer link below) |
+| Date | 2026-10-02T21:17:13 UTC (22:17:13 BST) — block 315,108,940 |
 | Network | Arbitrum Sepolia (chain selector `3478487238524512106`, chain ID 421614) |
 | Coin | USDC (`0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d` on Arb Sepolia) |
 | Signal | CRITICAL (level 3) — 300 bps simulated depeg via `stubScenario: "depeg"` in `config.arbitrum-staging.json` |
@@ -386,12 +386,13 @@ The first `onReport()` that actually executed was the 30-second tick after 22:14
 
 **Call sequence (§ 1.2 and `StableGuardCREReceiver` NatSpec):**
 
-Tick 1 (~22:14 BST) — creates WATCH event: `processReport(USDC, 3, evidenceRoot)`, score 3
-≥ `watchThreshold` 1 → `_create()` → `State.WATCH`, emits `EventCreated`.
-Transaction hash of this tick: **TBC** (check Arbiscan for the tx immediately before the
-protection tx on receiver `0xac83a85...`).
+**Ticks 1 and 2 (same transaction)** — `EventCreated` and all transitions to PROTECTED fired
+in the single protection tx. This was the first `onReport()` call after the receiver was
+redeployed; `processReport` called `_create()` (→ `State.WATCH`, emits `EventCreated`) and
+then `_applyScoreTransitions` immediately advanced to `CONFIRMED_DEPEG` (score 3 ≥
+`confirmedThreshold` 2) in the same call. There is no separate preceding WATCH tick on-chain.
 
-Tick 2 (~22:15 BST) — protection fires (this is the recorded transaction):
+**The protection tx (22:17:13 BST) — this is the recorded transaction:**
 
 1. `processReport(USDC, 3, evidenceRoot)` — score 3 ≥ `confirmedThreshold` 2 → `CONFIRMED_DEPEG`, emits `EventAdvanced`
 2. `ExposureRegistry.isExposed(vault, usdcKey)` → `true`
@@ -405,10 +406,24 @@ Tick 2 (~22:15 BST) — protection fires (this is the recorded transaction):
 | event | tx hash | explorer |
 |---|---|---|
 | Protection (vault paused → PROTECTED) | `0x2bce3db20f25841c7d0570440ffd22e05542842302286da790d6c9591f1cbc6c` | [Arbiscan](https://sepolia.arbiscan.io/tx/0x2bce3db20f25841c7d0570440ffd22e05542842302286da790d6c9591f1cbc6c) |
-| Preceding WATCH tick | TBC | TBC |
-| Recovery / unpause | TBC | TBC |
+| Preceding WATCH tick | None — `EventCreated` fired in the protection tx (no prior tick; see above) | — |
+| Recovery / unpause | No recovery as of 2026-10-17 (block 320,180,853). Vault remains paused. No `VaultUnpaused`, `RecoveryInitiated`, or `HoldReleased` found on-chain. | — |
 
-**TBC — fill in from the block explorer:**
-- Exact block timestamp of the protection tx
-- Hash of the preceding WATCH-creating tick (look up tx history on the receiver address)
-- Whether the vault was subsequently unpaused, and if so the recovery tx hash
+**All 14 events in the protection tx — decoded from chain:**
+
+| # | contract | event | key args |
+|---|---|---|---|
+| 1 | Receiver | `CoinAlert` | coin=USDC `0xA0b8…eB48`, deviationBps=300, signalLevel=3 |
+| 2 | Receiver | `DepegReport` | compositeScore=3, marketStress=0, observedAt=1790975830 |
+| 3 | Registry | `EventCreated` | eventId=`0xc6e8…f133`, score=3 → WATCH |
+| 4 | Registry | `EventAdvanced` | WATCH → CONFIRMED\_DEPEG |
+| 5 | Registry | `EventAdvanced` | CONFIRMED\_DEPEG → PROTECTION\_PENDING |
+| 6 | Registry | `ProtectionInitiated` | destCount=1 |
+| 7 | Ledger | `HoldAcquired` | holdId=`0x4968…79da`, vault=`0x8660…0497` |
+| 8 | Vault | `VaultPaused` | by=`0xac83…9aD8` (receiver) |
+| 9 | Registry | `DestinationUpdated` | destIndex=0, newState=COMPLETE |
+| 10 | Registry | `EventAdvanced` | PROTECTION\_PENDING → PROTECTED |
+| 11–13 | Receiver | *(3 internal state-storage logs, topic0=`0x8f32c7ab`)* | |
+| 14 | KeystoneForwarder | *(forwarder acknowledgement, topic0=`0x3617b009`)* | |
+
+**Event ID:** `0xc6e8da8f4cd97f7d134f8c2decc525263b761548285c748939fd4fe783aef133`
