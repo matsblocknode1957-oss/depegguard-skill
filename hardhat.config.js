@@ -26,6 +26,9 @@ module.exports = {
             chainId:  421614,
         },
     },
+    etherscan: {
+        apiKey: process.env.ETHERSCAN_API_KEY ?? "",
+    },
     paths: {
         sources:   "./stableguard-cre/contracts",
         tests:     "./test",
