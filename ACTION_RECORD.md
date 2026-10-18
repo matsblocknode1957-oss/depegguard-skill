@@ -470,17 +470,16 @@ Full output saved: `C:\Users\charl\Desktop\recovery-rehearsal.txt`
 
 The live Arbitrum Sepolia vault (`0x86602c…0497`) remains paused as of
 18 Oct 2026. The CRE workflow (`config.arbitrum-staging.json`) ran for
-approximately 48 minutes after the 2 Oct protection event — from the first
-`onReport()` at 22:17 UTC to the last recorded report at 22:05 UTC (98 total
+approximately 48 minutes after the 2 Oct protection event — from the protection
+tx at 21:17:13 UTC to the last recorded report at 22:05:38 UTC (98 total
 reports, `lastObservedAt = 2026-10-02T22:05:38`). It then stopped, leaving
 the event in PROTECTED state with stableCount = 0 and the vault frozen.
 
-This was a deliberate trial run: the workflow was started to demonstrate the
-full detect-and-protect sequence, not to run continuously. No one restarted it
-after the trial completed. Because the auto-recovery path requires the CRE
-workflow to be running and delivering healthy reports, the vault has remained
-paused since — the 2 Oct event TTL expired lazily while no workflow was active.
+The workflow stopped sending reports at 22:05 UTC on 2 Oct. The CRE Pro trial
+that enabled live workflow deployment was then ended on 3 Oct, so no further
+reports have been delivered.
 
-To recover: restart the CRE workflow without `stubScenario: "depeg"`. This
-rehearsal confirms the 6-tick automatic sequence will complete, vault will
-unpause, and the event will reach NORMAL with no deployer transactions.
+To recover: the CRE workflow needs to be running again without
+`stubScenario: "depeg"`, which requires CRE deployment access (not currently
+active). This rehearsal confirms that once reports resume, the 6-tick automatic
+sequence completes with no deployer transactions.
