@@ -15,6 +15,19 @@ module.exports = {
         },
     },
     networks: {
+        hardhat: {
+            forking: {
+                url:     ARB_SEPOLIA_RPC_URL,
+                enabled: process.env.FORK === "1",
+            },
+            chains: {
+                421614: {
+                    hardforkHistory: {
+                        cancun: 0,
+                    },
+                },
+            },
+        },
         sepolia: {
             url:      SEPOLIA_RPC_URL,
             accounts: CRE_ETH_PRIVATE_KEY ? [`0x${CRE_ETH_PRIVATE_KEY}`] : [],

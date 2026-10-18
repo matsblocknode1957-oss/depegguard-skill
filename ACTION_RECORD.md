@@ -427,3 +427,60 @@ then `_applyScoreTransitions` immediately advanced to `CONFIRMED_DEPEG` (score 3
 | 14 | KeystoneForwarder | *(forwarder acknowledgement, topic0=`0x3617b009`)* | |
 
 **Event ID:** `0xc6e8da8f4cd97f7d134f8c2decc525263b761548285c748939fd4fe783aef133`
+
+---
+
+## 6. Recovery rehearsal — 18 Oct 2026
+
+### What was run
+
+A local Hardhat fork of Arbitrum Sepolia was taken at the latest live block
+(~320,435,000–320,442,000 depending on run), and the recovery sequence was
+executed entirely in the fork. **Nothing was sent to the real testnet.**
+The script impersonated the KeystoneForwarder (`0x76c9cf...5E62`) — the only
+address the receiver's `onReport()` gate accepts — and submitted healthy USDC
+reports (USDC +5 bps, USDT −3 bps, DAI +2 bps, USDS +1 bps; all score 0 STABLE).
+
+Script: `scripts/fork-recovery-rehearsal.js`
+Command: `$env:FORK="1"; npx hardhat run scripts/fork-recovery-rehearsal.js --network hardhat`
+Full output saved: `C:\Users\charl\Desktop\recovery-rehearsal.txt`
+
+### Tick-by-tick results
+
+| tick | what happened | key events emitted |
+|------|---------------|--------------------|
+| Pre | Forked from live state: event `0xc6e8…f133` PROTECTED (state=4, G13-expired but lazy), vault paused, activeHoldCount=1, stableCount=0 | — |
+| 1 | First healthy report hits the stale event. G13 lazy expiry fires: event terminated as EXPIRED. `resumeProtectionTracking` is attempted for USDT/DAI/USDS but fails — the known `RecoveryResumeFailed` bug (missing `_coinHoldId != bytes32(0)` guard). Vault stays paused. | `EventTerminated(0xc6e8…, EXPIRED)`, `RecoveryResumeFailed` ×3 |
+| 2 | USDC has no active event and vault is still paused → receiver calls `resumeProtectionTracking`. Succeeds: fresh PROTECTED event `0xc676…c88` created, inheriting the original hold. | `RecoveryTrackingResumed(0xc676…c88)`, `RecoveryResumeFailed` ×3 (USDT/DAI/USDS, harmless) |
+| 3 | Healthy report → stableCount = 1 (1/3 of stabilityWindow). No state change. | `RecoveryResumeFailed` ×3 (harmless) |
+| 4 | Healthy report → stableCount = 2 (2/3). No state change. | `RecoveryResumeFailed` ×3 (harmless) |
+| 5 | Healthy report → stableCount = 3 (3/3). Auto-recovery fires: event advances PARTIALLY_PROTECTED→RECOVERY_PENDING, hold released (activeHoldCount→0), vault unpaused. | `EventAdvanced(…→RECOVERY_PENDING)`, `VaultUnpaused` |
+| 5+cool | Time advanced 1810s past recoveryCooldown (30 min). One more healthy report triggers `finalizeRecovery()`. Event terminates NORMAL. | `EventTerminated(0xc676…, NORMAL)` |
+
+### Final state (fork only)
+
+| field | value |
+|-------|-------|
+| `vault.paused()` | `false` |
+| `activeHoldCount` | 0 |
+| USDC event | no active event (NORMAL reached — terminal) |
+| Total ticks | 6 (5 recovery ticks + 1 post-cooldown finalise tick) |
+
+### Why the live contracts are still paused
+
+The live Arbitrum Sepolia vault (`0x86602c…0497`) remains paused as of
+18 Oct 2026. The CRE workflow (`config.arbitrum-staging.json`) ran for
+approximately 48 minutes after the 2 Oct protection event — from the first
+`onReport()` at 22:17 UTC to the last recorded report at 22:05 UTC (98 total
+reports, `lastObservedAt = 2026-10-02T22:05:38`). It then stopped, leaving
+the event in PROTECTED state with stableCount = 0 and the vault frozen.
+
+This was a deliberate trial run: the workflow was started to demonstrate the
+full detect-and-protect sequence, not to run continuously. No one restarted it
+after the trial completed. Because the auto-recovery path requires the CRE
+workflow to be running and delivering healthy reports, the vault has remained
+paused since — the 2 Oct event TTL expired lazily while no workflow was active.
+
+To recover: restart the CRE workflow without `stubScenario: "depeg"`. This
+rehearsal confirms the 6-tick automatic sequence will complete, vault will
+unpause, and the event will reach NORMAL with no deployer transactions.
