@@ -17,8 +17,8 @@ module.exports = {
     networks: {
         hardhat: {
             forking: {
-                url: ARB_SEPOLIA_RPC_URL,
-                enabled: true,
+                url:     ARB_SEPOLIA_RPC_URL,
+                enabled: process.env.FORK === "1",
             },
             chains: {
                 421614: {

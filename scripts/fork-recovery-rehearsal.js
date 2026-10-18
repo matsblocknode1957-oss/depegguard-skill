@@ -1,4 +1,5 @@
 "use strict";
+// Run with: $env:FORK="1"; npx hardhat run scripts/fork-recovery-rehearsal.js --network hardhat
 
 /**
  * Fork Recovery Rehearsal
