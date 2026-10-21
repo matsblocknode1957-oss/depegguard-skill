@@ -54,3 +54,16 @@ arbitrum-production-settings:
     - chain-name: ethereum-testnet-sepolia-arbitrum-1
       url: https://sepolia-rollup.arbitrum.io/rpc
 
+# ==========================================================================
+arbitrum-staging-disagree-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia-arbitrum-1
+      url: https://sepolia-rollup.arbitrum.io/rpc
+
+# ==========================================================================
+arbitrum-staging-live-settings:
+  rpcs:
+    - chain-name: ethereum-testnet-sepolia-arbitrum-1
+      url: https://sepolia-rollup.arbitrum.io/rpc
+    - chain-name: ethereum-mainnet
+      url: https://ethereum-rpc.publicnode.com

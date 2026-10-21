@@ -30,3 +30,21 @@ arbitrum-production-settings:
     workflow-path: "./main.ts"
     config-path: "./config.arbitrum-production.json"
     secrets-path: "../secrets.yaml"
+
+arbitrum-staging-disagree-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-arbitrum-staging-disagree"
+    deployment-registry: "private"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.arbitrum-staging-disagree.json"
+    secrets-path: "../secrets.yaml"
+
+arbitrum-staging-live-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-arbitrum-staging-live"
+    deployment-registry: "private"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.arbitrum-staging-live.json"
+    secrets-path: "../secrets.yaml"
