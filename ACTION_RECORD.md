@@ -317,6 +317,90 @@ reaches `stabilityWindow`, so a vault can never be permanently stuck with
 nothing tracking it. No automatic unpause is tied to the TTL clock; recovery
 remains condition-based, not calendar-based.
 
+**Customer human override — built on branch `feat/human-override` (2026-10-29):**
+
+The full customer override mechanism is now implemented across four contracts
+and 25 edge-case tests (283 total passing, up from 258). Two design
+corrections were applied after the initial build:
+
+- **Holds are opt-in.** `registerHold` (called on every vault freeze) only
+  records a slot; it does NOT activate a hold. `isHoldActive` is false by
+  default, so auto-recovery works exactly as before without any customer
+  action. A single Safe owner must explicitly call `placeHold` to activate.
+- **Module approval is the customer's, never StableGuard's.** The ledger
+  uses per-vault approval (`vaultApprovedModule[vault]`), set only by an
+  address holding GOVERNANCE_ROLE on that vault. The receiver's
+  `setOverrideModule` likewise requires GOVERNANCE_ROLE on the vault. No
+  StableGuard admin or governance key has any path to set or change the
+  approved module on a customer vault.
+
+*What was built:*
+
+- **`DepegEventRegistry`** — new `DestState.HOLD_PAUSED` (value 4); new
+  `markHoldPaused(eventId, destIndex)` (PAUSE_COORDINATOR_ROLE); HOLD_PAUSED
+  transition allowed only to COMPLETE in `destinationCallback`; G11/G12 guards
+  and `settlePending` all skip FAILED termination while any dest is HOLD_PAUSED;
+  five new view helpers (`getEventRootIncidentId`, `getEventCompositeScore`,
+  `getEventCoin`, `getEventDestinationCount`, `getEventDestinationVault`).
+
+- **`ProtectionHoldLedger`** — removed global `overrideModule` / `setOverrideModule`;
+  added per-vault `vaultApprovedModule` mapping and `approveVaultModule(vault,
+  module)` callable only by an address with GOVERNANCE_ROLE on `vault` (the
+  customer); `releaseByOverride(holdId)` checks
+  `msg.sender == vaultApprovedModule[hold.vault]`; events `VaultModuleApproved`
+  and `HoldReleasedByOverride`.
+
+- **`CustomerOverrideModule`** (new contract) — per-vault override Safe
+  registration (`setVaultAuthority` — GOVERNANCE_ROLE on vault);
+  per-vault receiver registration (`setVaultReceiver` — GOVERNANCE_ROLE on
+  vault); `registerHold(coin, vault, rootId, ledgerHoldId, score)` (PAUSE_COORDINATOR_ROLE)
+  records a slot only — no activation, `holdUntil` stays 0; `placeHold(coin,
+  vault)` callable by any single Safe owner (`ISafe.isOwner`) — sets
+  `holdUntil = now + maxHoldDuration`, emits `HoldPlaced(coin, vault, signer,
+  holdUntil)`; `isHoldActive` and `isHoldRegistered` views; `earlyUnlock(coin,
+  vault, rootId)` (full Safe as msg.sender) — releases ledger hold via
+  `releaseByOverride`, calls `receiver.executeEarlyUnlock`, stores suppression
+  window; `cancelHold(coin, vault)` (full Safe) — deactivates active hold
+  without touching physical vault freeze; `renewHold(coin, vault, newDuration)`
+  (single Safe owner) — resets `holdUntil` to exactly `now + newDuration` (not
+  additive); `isSuppressed(rootId, vault, score)` view; admin setters for
+  `maxHoldDuration` and `suppressionWindow`.
+
+- **`StableGuardCREReceiver`** — `_coinHoldId` re-keyed to
+  `mapping(address => mapping(address => bytes32))` (coin → vault → holdId);
+  new `overrideModule` field + `setOverrideModule(address)` requiring
+  GOVERNANCE_ROLE on vault (customer-controlled; StableGuard admin has no path);
+  new `executeEarlyUnlock(coin, vault)` callable only by overrideModule —
+  clears hold ID, unfreezes vault if fully released, transitions HOLD_PAUSED →
+  COMPLETE in the registry; recovery handler widened to also process
+  `PARTIALLY_RECOVERED` state; override hold gate: PENDING dest + active hold →
+  `markHoldPaused`; HOLD_PAUSED + expired/cancelled hold → falls through to
+  normal recovery; `registerHold` call added after successful vault freeze
+  (Call 3.5); Solidity optimizer enabled (runs 200) to stay within EIP-170
+  code-size limit.
+
+- **`test/MockSafe.sol`** (new contract) — `mapping(address => bool) public
+  isOwner`; `addOwner(address)` helper; forwards `earlyUnlock` and `cancelHold`
+  through the Safe (msg.sender = Safe address); single owners call `placeHold`
+  and `renewHold` directly on the module.
+
+- **`test/customer-override.test.js`** (new file) — 25 edge cases covering auth
+  guards, opt-in hold lifecycle (`placeHold`, `renewHold`, `cancelHold`),
+  suppression window, full earlyUnlock/cancelHold/pendingTTL integration paths,
+  Fix A correctness (no hold → auto-recovery, single owner → HOLD_PAUSED), and
+  Fix B security (admin/stranger cannot set override module; vault governance can).
+
+*Key invariants preserved:*
+- PAUSE_COORDINATOR_ROLE single-holder constraint is enforced in production
+  (not violated; dual-holder only in test fixtures as a deliberate test setup).
+- StableGuard has no path to customer vault override authority (module approval
+  is per-vault and gated by GOVERNANCE_ROLE on the vault, not on StableGuard).
+- One customer's hold never delays another vault: hold isolation is per
+  (coin, vault), not per event.
+- Holds survive `resumeProtectionTracking` via rootIncidentId inheritance.
+- Auto-recovery is entirely unaffected unless the customer explicitly calls
+  `placeHold`; vaults with no override Safe configured are unaffected entirely.
+
 ---
 
 ## 4. Threshold and configuration caveat

@@ -22,7 +22,7 @@ interface IDepegEventRegistry {
         PROTECTED, RECOVERY_PENDING, PARTIALLY_RECOVERED,
         NORMAL, EXPIRED, FAILED, SUPERSEDED
     }
-    enum DestState { PENDING, COMPLETE, SUPERSEDED, FAILED }
+    enum DestState { PENDING, COMPLETE, SUPERSEDED, FAILED, HOLD_PAUSED }
     struct DestinationInput { uint64 chainSelector; address vault; }
 
     function processReport(address coin, uint8 score, bytes32 evidenceRoot)
@@ -30,6 +30,7 @@ interface IDepegEventRegistry {
     function initiateProtection(bytes32 eventId, DestinationInput[] calldata dests) external;
     function destinationCallback(bytes32 eventId, uint256 destIndex, DestState newDestState) external;
     function getDestinationState(bytes32 eventId, uint256 destIndex) external view returns (DestState);
+    function markHoldPaused(bytes32 eventId, uint256 destIndex) external;
     function resumeProtectionTracking(
         address coin,
         bytes32 evidenceRoot,
@@ -38,6 +39,8 @@ interface IDepegEventRegistry {
         bytes32 holdId
     ) external returns (bytes32 eventId);
     function finalizeRecovery(bytes32 eventId) external;
+    function getEventRootIncidentId(bytes32 eventId) external view returns (bytes32);
+    function getEventCompositeScore(bytes32 eventId) external view returns (uint8);
 }
 
 interface IProtectionHoldLedger {
@@ -50,6 +53,21 @@ interface IProtectionHoldLedger {
     function release(bytes32 holdId) external returns (bool vaultFullyReleased);
     function activeHoldCount(address vault) external view returns (uint256);
     function requiredFreezeMode(address vault) external view returns (FreezeMode);
+}
+
+interface IAccessControl {
+    function hasRole(bytes32 role, address account) external view returns (bool);
+}
+
+interface ICustomerOverrideModule {
+    function registerHold(
+        address coin,
+        address vault,
+        bytes32 rootIncidentId,
+        bytes32 ledgerHoldId,
+        uint8   score
+    ) external;
+    function isHoldActive(address coin, address vault) external view returns (bool);
 }
 
 /**
@@ -104,9 +122,10 @@ contract StableGuardCREReceiver {
     address public admin;
     address public expectedWorkflowOwner;   // zero = skip check
     bytes32 public expectedWorkflowId;      // zero = skip check
+    address public overrideModule;          // CustomerOverrideModule; zero = feature disabled
 
-    // Per-coin hold tracking for lineage proof on resumeProtectionTracking
-    mapping(address => bytes32) private _coinHoldId;   // coin => active holdId (0 = none)
+    // Per-(coin,vault) hold tracking — vault axis future-proofs multi-coin receivers
+    mapping(address => mapping(address => bytes32)) private _coinHoldId; // coin => vault => holdId
     mapping(address => bytes32) private _lastEventId;  // coin => last non-zero eventId seen
 
     struct CoinSignal {
@@ -147,6 +166,8 @@ contract StableGuardCREReceiver {
     event AdminChanged(address indexed previousAdmin, address indexed newAdmin);
     event WorkflowOwnerSet(address indexed previousOwner, address indexed newOwner);
     event WorkflowIdSet(bytes32 indexed previousId, bytes32 indexed newId);
+    event OverrideModuleSet(address indexed previousModule, address indexed newModule);
+    event EarlyUnlockExecuted(address indexed coin, address indexed vault);
 
     error UnauthorizedForwarder(address caller);
     error ReportTooOld(uint256 observedAt, uint256 blockTimestamp, uint256 maxAge);
@@ -155,6 +176,9 @@ contract StableGuardCREReceiver {
     error UnauthorizedWorkflow(address workflowOwner, bytes32 workflowId);
     error InvalidMetadata(uint256 length);
     error ZeroAddress();
+    error Unauthorized();
+    error UnauthorizedOverrideModule(address caller);
+    error VaultMismatch(address given, address expected);
 
     constructor(
         address _forwarder,
@@ -192,6 +216,59 @@ contract StableGuardCREReceiver {
         if (msg.sender != admin) revert UnauthorizedAdmin(msg.sender);
         emit WorkflowIdSet(expectedWorkflowId, newId);
         expectedWorkflowId = newId;
+    }
+
+    bytes32 private constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
+
+    // Callable only by an address holding GOVERNANCE_ROLE on this receiver's vault
+    // (the customer), not by the StableGuard admin.
+    function setOverrideModule(address module) external {
+        if (!IAccessControl(vault).hasRole(GOVERNANCE_ROLE, msg.sender)) revert Unauthorized();
+        emit OverrideModuleSet(overrideModule, module);
+        overrideModule = module;
+    }
+
+    // ── executeEarlyUnlock ────────────────────────────────────────────────────
+    // Called by CustomerOverrideModule after it has already released the ledger
+    // hold via releaseByOverride.  Clears local hold tracking, unfreezes the
+    // vault (if fully released), and marks the destination slot COMPLETE.
+
+    function executeEarlyUnlock(address coin, address vault_) external {
+        if (msg.sender != overrideModule) revert UnauthorizedOverrideModule(msg.sender);
+        if (vault_ != vault)             revert VaultMismatch(vault_, vault);
+
+        _coinHoldId[coin][vault] = bytes32(0);
+
+        bytes32 sym = bytes32(uint256(uint160(coin)));
+
+        // Unfreeze vault if the ledger confirms no remaining holds
+        if (holdLedger.activeHoldCount(vault) == 0) {
+            if (IPausable(vault).paused()) {
+                try IPausable(vault).unpause() { }
+                catch (bytes memory reason) {
+                    emit VaultUnpauseFailed(vault, sym, reason);
+                }
+            }
+            if (IPausable(vault).depositsFrozen()) {
+                try IPausable(vault).unpauseDeposits() { }
+                catch (bytes memory reason) {
+                    emit VaultUnpauseFailed(vault, sym, reason);
+                }
+            }
+        }
+
+        // Transition HOLD_PAUSED → COMPLETE in the event registry
+        bytes32 evId = _lastEventId[coin];
+        if (evId != bytes32(0)) {
+            IDepegEventRegistry.DestState ds = eventRegistry.getDestinationState(evId, 0);
+            if (ds == IDepegEventRegistry.DestState.HOLD_PAUSED) {
+                try eventRegistry.destinationCallback(evId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
+                catch (bytes memory reason) {
+                    emit RegistryCallbackFailed(evId, coin, reason);
+                }
+            }
+        }
+        emit EarlyUnlockExecuted(coin, vault);
     }
 
     function onReport(bytes calldata metadata, bytes calldata report) external {
@@ -297,17 +374,36 @@ contract StableGuardCREReceiver {
             bytes32 sym = bytes32(uint256(uint160(coin)));
 
             // ── Auto-recovery: vault unpause ──────────────────────────────────────
-            // Fires when processReport transitions PROTECTED → RECOVERY_PENDING,
-            // and on subsequent cycles until the destination slot is settled.
-            if (newState == IDepegEventRegistry.State.RECOVERY_PENDING) {
+            // Fires when processReport returns RECOVERY_PENDING or PARTIALLY_RECOVERED.
+            // PARTIALLY_RECOVERED occurs when an override hold has advanced the event
+            // past pendingTTL but this vault's destination slot is still HOLD_PAUSED.
+            bool isRecovering = newState == IDepegEventRegistry.State.RECOVERY_PENDING
+                || newState == IDepegEventRegistry.State.PARTIALLY_RECOVERED;
+            if (isRecovering) {
+                // Override hold gate: if the module has an active hold for (coin, vault),
+                // block recovery by marking the slot HOLD_PAUSED, then wait.
+                address om = overrideModule;
+                if (om != address(0) && ICustomerOverrideModule(om).isHoldActive(coin, vault)) {
+                    IDepegEventRegistry.DestState curDs = eventRegistry.getDestinationState(eventId, 0);
+                    if (curDs == IDepegEventRegistry.DestState.PENDING) {
+                        try eventRegistry.markHoldPaused(eventId, 0) { } catch { }
+                    }
+                    // HOLD_PAUSED: hold still active — nothing to do this cycle
+                    try eventRegistry.finalizeRecovery(eventId) { } catch { }
+                    continue;
+                }
+
+                // No active override hold — normal recovery flow.
+                // Works for both PENDING and HOLD_PAUSED dest states:
+                // HOLD_PAUSED → COMPLETE is a valid destinationCallback transition.
                 bool vaultFrozen = IPausable(vault).paused() || IPausable(vault).depositsFrozen();
-                if (vaultFrozen && (_coinHoldId[coin] != bytes32(0) || holdLedger.activeHoldCount(vault) == 0)) {
-                    bytes32 hId = _coinHoldId[coin];
+                if (vaultFrozen && (_coinHoldId[coin][vault] != bytes32(0) || holdLedger.activeHoldCount(vault) == 0)) {
+                    bytes32 hId = _coinHoldId[coin][vault];
                     bool holdReleased = false;
                     bool vaultFullyReleased = false;
                     if (hId != bytes32(0)) {
                         try holdLedger.release(hId) returns (bool _vfr) {
-                            _coinHoldId[coin] = bytes32(0);
+                            _coinHoldId[coin][vault] = bytes32(0);
                             holdReleased = true;
                             vaultFullyReleased = _vfr;
                         } catch { }
@@ -375,14 +471,15 @@ contract StableGuardCREReceiver {
                         }
                     } else if (unpaused) {
                         // Hold released and vault fully unpaused — complete success.
+                        // Valid for both PENDING → COMPLETE and HOLD_PAUSED → COMPLETE.
                         try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
                         catch (bytes memory reason) {
                             emit RegistryCallbackFailed(eventId, coin, reason);
                         }
                     }
-                    // holdReleased && !unpaused: skip callback — destination stays PENDING so
-                    // the event remains in RECOVERY_PENDING for the next cycle's retry path.
-                } else if (!vaultFrozen && _coinHoldId[coin] == bytes32(0)) {
+                    // holdReleased && !unpaused: skip callback — destination stays PENDING/HOLD_PAUSED
+                    // so the event stays in RECOVERY_PENDING/PARTIALLY_RECOVERED for the next cycle.
+                } else if (!vaultFrozen && _coinHoldId[coin][vault] == bytes32(0)) {
                     if (eventRegistry.getDestinationState(eventId, 0) == IDepegEventRegistry.DestState.PENDING) {
                         try eventRegistry.destinationCallback(eventId, 0, IDepegEventRegistry.DestState.COMPLETE) { }
                         catch (bytes memory reason) {
@@ -399,7 +496,7 @@ contract StableGuardCREReceiver {
             // Fires when the prior PROTECTED event expired before stableCount
             // reached stabilityWindow. The vault is still paused and needs
             // a fresh PROTECTED event to re-arm auto-recovery.
-            if (eventId == bytes32(0) && _coinHoldId[coin] != bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
+            if (eventId == bytes32(0) && _coinHoldId[coin][vault] != bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
                 IDepegEventRegistry.DestinationInput[] memory resumeDests =
                     new IDepegEventRegistry.DestinationInput[](1);
                 resumeDests[0] = IDepegEventRegistry.DestinationInput({
@@ -408,7 +505,7 @@ contract StableGuardCREReceiver {
                 });
                 try eventRegistry.resumeProtectionTracking(
                     coin, bytes32(0), resumeDests,
-                    _lastEventId[coin], _coinHoldId[coin]
+                    _lastEventId[coin], _coinHoldId[coin][vault]
                 ) { }
                 catch (bytes memory reason) {
                     emit RecoveryResumeFailed(coin, reason);
@@ -448,9 +545,9 @@ contract StableGuardCREReceiver {
             try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
                 returns (bytes32 hId)
             {
-                _coinHoldId[coin] = hId;
-                acquiredHoldId    = hId;
-                holdAcquired      = true;
+                _coinHoldId[coin][vault] = hId;
+                acquiredHoldId           = hId;
+                holdAcquired             = true;
             } catch { }
 
             // Call 4: freeze vault — only if hold was acquired.
@@ -482,9 +579,19 @@ contract StableGuardCREReceiver {
 
                 if (!pauseResult) {
                     try holdLedger.release(acquiredHoldId) { } catch { }
-                    _coinHoldId[coin] = bytes32(0);
-                    holdAcquired      = false;
+                    _coinHoldId[coin][vault] = bytes32(0);
+                    holdAcquired             = false;
                 }
+            }
+
+            // Call 3.5: register override hold — no-op if module not set or vault has no authority.
+            // Called after successful acquire so the module has a valid ledger holdId to store.
+            if (holdAcquired && overrideModule != address(0)) {
+                bytes32 rootId = eventRegistry.getEventRootIncidentId(eventId);
+                uint8   score  = eventRegistry.getEventCompositeScore(eventId);
+                try ICustomerOverrideModule(overrideModule).registerHold(
+                    coin, vault, rootId, acquiredHoldId, score
+                ) { } catch { }
             }
 
             // Call 5: close the destination slot with the honest result.

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.24;
 
+interface IAccessControl {
+    function hasRole(bytes32 role, address account) external view returns (bool);
+}
+
 /// @notice Per-vault freeze behaviour required by each hold.
 ///         FULL_FREEZE         — block deposits AND withdrawals.
 ///         DEPOSIT_ONLY_FREEZE — block new deposits only; leave withdrawals open.
@@ -36,8 +40,13 @@ contract ProtectionHoldLedger {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
+    bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
+
     address public governance;
     address public coordinator;
+
+    // vault → CustomerOverrideModule approved by that vault's governance
+    mapping(address => address) public vaultApprovedModule;
 
     mapping(bytes32 => ProtectionHold) public holds;
     mapping(address => uint256)        public activeHoldCount;
@@ -62,8 +71,14 @@ contract ProtectionHoldLedger {
         address         vault,
         bool            vaultFullyReleased
     );
+    event HoldReleasedByOverride(
+        bytes32 indexed holdId,
+        address         vault,
+        bool            vaultFullyReleased
+    );
     event CoordinatorTransferred(address indexed oldCoordinator, address indexed newCoordinator);
     event GovernanceTransferred(address indexed oldGovernance, address indexed newGovernance);
+    event VaultModuleApproved(address indexed vault, address indexed module);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -182,5 +197,34 @@ contract ProtectionHoldLedger {
         activeHoldCount[h.vault]--;
         vaultFullyReleased = activeHoldCount[h.vault] == 0;
         emit HoldReleased(holdId, h.vault, vaultFullyReleased);
+    }
+
+    // ── approveVaultModule ────────────────────────────────────────────────────
+    // Callable only by an address holding GOVERNANCE_ROLE on `vault` (the customer).
+    // StableGuard governance has no path to set or change this.
+
+    function approveVaultModule(address vault, address module) external {
+        if (!IAccessControl(vault).hasRole(GOVERNANCE_ROLE, msg.sender)) revert Unauthorized();
+        if (module == address(0)) revert ZeroAddress();
+        emit VaultModuleApproved(vault, module);
+        vaultApprovedModule[vault] = module;
+    }
+
+    // ── releaseByOverride ─────────────────────────────────────────────────────
+
+    /// @notice Release an active hold on behalf of a CustomerOverrideModule.
+    ///         Bypasses the coordinator check; callable only by the module that
+    ///         the hold's vault's governance has approved via approveVaultModule.
+    function releaseByOverride(bytes32 holdId) external returns (bool vaultFullyReleased) {
+        ProtectionHold storage h = holds[holdId];
+        if (h.vault == address(0)) revert HoldNotFound(holdId);
+        if (msg.sender != vaultApprovedModule[h.vault]) revert Unauthorized();
+        if (!h.active)             revert HoldAlreadyReleased(holdId);
+
+        h.active = false;
+        if (h.requiredMode == FreezeMode.FULL_FREEZE) fullFreezeHoldCount[h.vault]--;
+        activeHoldCount[h.vault]--;
+        vaultFullyReleased = activeHoldCount[h.vault] == 0;
+        emit HoldReleasedByOverride(holdId, h.vault, vaultFullyReleased);
     }
 }

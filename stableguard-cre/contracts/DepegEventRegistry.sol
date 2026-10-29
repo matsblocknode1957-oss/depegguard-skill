@@ -62,10 +62,11 @@ contract DepegEventRegistry {
     }
 
     enum DestState {
-        PENDING,    // 0 – CCIP message in-flight
-        COMPLETE,   // 1 – delivery confirmed  (sticky: DC cannot overwrite)
-        SUPERSEDED, // 2 – destination no longer relevant
-        FAILED      // 3 – delivery failed
+        PENDING,     // 0 – CCIP message in-flight
+        COMPLETE,    // 1 – delivery confirmed  (sticky: DC cannot overwrite)
+        SUPERSEDED,  // 2 – destination no longer relevant
+        FAILED,      // 3 – delivery failed
+        HOLD_PAUSED  // 4 – blocked by an active customer override hold; resumes on hold expiry
     }
 
     // ── Structs ───────────────────────────────────────────────────────────────
@@ -135,6 +136,7 @@ contract DepegEventRegistry {
     event RecoveryInitiated(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event RecoveryTrackingResumed(bytes32 indexed eventId, address indexed coin, uint256 destCount);
     event DestinationUpdated(bytes32 indexed eventId, uint256 indexed destIndex, DestState newState);
+    event DestinationHoldPaused(bytes32 indexed eventId, uint256 indexed destIndex);
     event ControllerTransferred(address indexed oldController, address indexed newController);
     event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
@@ -351,17 +353,27 @@ contract DepegEventRegistry {
             _terminate(eventId, coinKey, State.FAILED);
             return;
         }
-        // G12: pendingTTL applies to RECOVERY_PENDING only (not PARTIALLY_RECOVERED)
+        // G12: pendingTTL applies to RECOVERY_PENDING only (not PARTIALLY_RECOVERED).
+        //      Exception: do not fail while any destination is HOLD_PAUSED — a customer
+        //      hold is blocking that slot and the event must wait for hold expiry.
         if (ev.state == State.RECOVERY_PENDING &&
             block.timestamp >= ev.recoveryInitiatedAt + pendingTTL) {
-            _terminate(eventId, coinKey, State.FAILED);
-            return;
+            if (!_hasHoldPaused(eventId)) {
+                _terminate(eventId, coinKey, State.FAILED);
+                return;
+            }
         }
 
-        // DG1/DG2/DG2b/DG3: slot must be PENDING
+        // DG1/DG2/DG2b/DG3: slot must be PENDING.
+        // Exception: HOLD_PAUSED → COMPLETE is allowed (hold expired, receiver completing).
         if (destIndex >= ev.destinations.length) revert DestinationIndexOutOfRange(destIndex);
         DestState cur = ev.destinations[destIndex].state;
-        if (cur != DestState.PENDING) revert DestinationNotPending(destIndex, cur);
+        if (cur == DestState.HOLD_PAUSED) {
+            if (newDestState != DestState.COMPLETE) revert DestinationNotPending(destIndex, cur);
+            // fall through — HOLD_PAUSED → COMPLETE is valid
+        } else if (cur != DestState.PENDING) {
+            revert DestinationNotPending(destIndex, cur);
+        }
 
         ev.destinations[destIndex].state = newDestState;
         emit DestinationUpdated(eventId, destIndex, newDestState);
@@ -498,6 +510,36 @@ contract DepegEventRegistry {
         emit RecoveryTrackingResumed(eventId, coin, dests.length);
     }
 
+    // ── markHoldPaused ────────────────────────────────────────────────────────
+
+    /// @notice Mark a PENDING destination slot as HOLD_PAUSED because an active customer
+    ///         override hold is blocking physical vault recovery.  The slot no longer
+    ///         contributes to the "allSettled" check as PENDING, so the event can advance
+    ///         to PARTIALLY_RECOVERED (and escape pendingTTL) while other destinations
+    ///         complete.  When the hold expires the receiver calls destinationCallback with
+    ///         COMPLETE directly from HOLD_PAUSED — that transition is explicitly allowed.
+    ///         The pendingTTL FAILED gate is suppressed while any slot is HOLD_PAUSED.
+    function markHoldPaused(bytes32 eventId, uint256 destIndex) external {
+        _requireRole(PAUSE_COORDINATOR_ROLE);
+
+        DepegEvent storage ev = _events[eventId];
+        _requireExists(ev);
+        _requireNonTerminal(ev);
+
+        bool isRecovering = ev.state == State.RECOVERY_PENDING || ev.state == State.PARTIALLY_RECOVERED;
+        if (!isRecovering) revert InvalidTransition(ev.state);
+
+        if (destIndex >= ev.destinations.length) revert DestinationIndexOutOfRange(destIndex);
+        DestState cur = ev.destinations[destIndex].state;
+        if (cur != DestState.PENDING) revert DestinationNotPending(destIndex, cur);
+
+        ev.destinations[destIndex].state = DestState.HOLD_PAUSED;
+        emit DestinationHoldPaused(eventId, destIndex);
+
+        bytes32 coinKey = keccak256(abi.encode(ev.coin));
+        _evaluateRecovery(eventId, coinKey);
+    }
+
     // ── retryFailedDestinations ───────────────────────────────────────────────
 
     /// @notice DG4/DG5: re-mark specific FAILED destinations as PENDING for retry.
@@ -593,6 +635,8 @@ contract DepegEventRegistry {
             if (block.timestamp < ev.protectionInitiatedAt + pendingTTL) revert PendingNotTimedOut();
         } else if (ev.state == State.RECOVERY_PENDING) {
             if (block.timestamp < ev.recoveryInitiatedAt + pendingTTL) revert PendingNotTimedOut();
+            // Don't FAIL while a customer hold is blocking a destination slot.
+            if (_hasHoldPaused(eventId)) return;
         } else {
             revert InvalidTransition(ev.state);
         }
@@ -735,8 +779,11 @@ contract DepegEventRegistry {
             ev.state = State.PARTIALLY_RECOVERED;
             emit EventAdvanced(eventId, ev.coin, from, State.PARTIALLY_RECOVERED);
         } else if (completeCount == 0 && from == State.RECOVERY_PENDING) {
-            // G11: all failed on initial attempt
-            _terminate(eventId, coinKey, State.FAILED);
+            // G11: all failed on initial attempt — but don't terminate if any slot is
+            // HOLD_PAUSED; those are waiting for hold expiry, not genuinely failed.
+            if (!_hasHoldPaused(eventId)) {
+                _terminate(eventId, coinKey, State.FAILED);
+            }
         }
         // PARTIALLY_RECOVERED + retry still partial: await more retries or TTL
     }
@@ -788,9 +835,12 @@ contract DepegEventRegistry {
         allSettled = true;
         for (uint256 i; i < total; ) {
             DestState s = dests[i].state;
-            if (s == DestState.PENDING)    allSettled = false;
-            if (s == DestState.COMPLETE)   completeCount++;
-            if (s == DestState.SUPERSEDED) supersededCount++;
+            if (s == DestState.PENDING)     allSettled = false;
+            if (s == DestState.COMPLETE)    completeCount++;
+            if (s == DestState.SUPERSEDED)  supersededCount++;
+            // HOLD_PAUSED: counts as settled (not PENDING) but neither complete nor
+            // superseded — so effectiveTotal includes it and the event can only reach
+            // NORMAL once it eventually transitions to COMPLETE.
             unchecked { ++i; }
         }
     }
@@ -822,5 +872,40 @@ contract DepegEventRegistry {
             || s == State.PROTECTED
             || s == State.RECOVERY_PENDING
             || s == State.PARTIALLY_RECOVERED;
+    }
+
+    // ── Internal: HOLD_PAUSED scan ────────────────────────────────────────────
+
+    function _hasHoldPaused(bytes32 eventId) internal view returns (bool) {
+        Destination[] storage dests = _events[eventId].destinations;
+        for (uint256 i; i < dests.length; ) {
+            if (dests[i].state == DestState.HOLD_PAUSED) return true;
+            unchecked { ++i; }
+        }
+        return false;
+    }
+
+    // ── View helpers for CustomerOverrideModule ───────────────────────────────
+
+    function getEventRootIncidentId(bytes32 eventId) external view returns (bytes32) {
+        return _events[eventId].rootIncidentId;
+    }
+
+    function getEventCompositeScore(bytes32 eventId) external view returns (uint8) {
+        return _events[eventId].compositeScore;
+    }
+
+    function getEventCoin(bytes32 eventId) external view returns (address) {
+        return _events[eventId].coin;
+    }
+
+    function getEventDestinationCount(bytes32 eventId) external view returns (uint256) {
+        return _events[eventId].destinations.length;
+    }
+
+    function getEventDestinationVault(bytes32 eventId, uint256 index) external view returns (address) {
+        DepegEvent storage ev = _events[eventId];
+        if (index >= ev.destinations.length) return address(0);
+        return ev.destinations[index].vault;
     }
 }
