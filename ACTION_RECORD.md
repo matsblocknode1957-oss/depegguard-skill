@@ -433,3 +433,63 @@ The `classifySignal` thresholds in `stableguard-cre/depeg-monitor/main.ts`
 (20 / 50 / 100 bps → WATCH / HEDGE / EXIT) are the confirmed production
 values — they are hardcoded in the CRE workflow and not constructor
 parameters.
+
+---
+
+## 5. Morpho Sentinel Adapter
+
+**Built on branch `feat/morpho-sentinel` (2026-10-30).**
+
+### 5.1 What's built and tested
+
+Two new contracts and an extended integration test suite (308 total tests, up from 283):
+
+**`MorphoSentinelAdapter.sol`** — a receiver-callable adapter that uses the Morpho Vault V2 sentinel role to zero absolute and relative caps for each registered market and deallocate any remaining allocation on confirmed depeg. Key properties:
+
+| behaviour | how enforced | tests |
+|---|---|---|
+| `setMorphoAdapter` reads vault's CURRENT `owner()` live on every call — if ownership transfers, old owner loses access immediately | `IVaultOwner(vault).owner()` called inside `setMorphoAdapter` with no cached value | T-19, T-23 |
+| `registerMarkets` decodes each entry's `marketData` as `MarketParams` and reverts if `collateralToken != coin` | `abi.decode` + `CollateralMismatch` custom error | T-11 |
+| `criticalThreshold` defaults to 3; can be lowered to 2; 0 and 1 are rejected | constructor sets 3; `setCriticalThreshold` reverts `InvalidThreshold` for value < 2 | T-2, T-3, T-4a, T-4b |
+| `onDepeg` returns `marketsCapped`; returning 0 causes the receiver to mark the destination slot FAILED and release the hold | receiver checks `marketsCapped > 0` for `pauseResult`; `holdLedger.release` + `destinationCallback(FAILED)` on false | T-22 (asserts `activeHoldCount == 0` and `EventTerminated(FAILED)`) |
+| StableGuard admin cannot set the Morpho adapter | `setMorphoAdapter` auth is `vault.owner()`, not the StableGuard `admin` key | T-19 |
+| `vaultAuthority()` on both adapter and receiver returns a live read of `vault.owner()` | `try morphoVault.owner()` with no state cache | T-16, T-20 |
+| `onDepeg` / `onRecovery` callable only by the registered receiver | `_requireReceiver()` guard | T-15a, T-15b |
+| All owner-gated functions (setReceiver, registerMarkets, clearMarkets, setCriticalThreshold) require `vault.owner()` | `_requireVaultOwner()` | T-12, T-18 |
+| Deallocate failure is non-fatal — caps are still counted if either cap decrease succeeded | `try/catch` per market; `capSuccess` flag independent of deallocate | T-7 |
+| If both cap decreases fail, that market is not counted (marketsCapped stays 0 for that market) | `capSuccess` only set true when a cap call succeeds | T-9, T-10 |
+| Allocation of 0 skips the deallocate call entirely | `if (alloc > 0)` guard | T-8 |
+
+**`StableGuardCREReceiver.sol` — Morpho path additions:**
+
+- `morphoAdapter` storage field (address; zero = standard `IPausable` path)
+- `setMorphoAdapter(address)` — auth: `vault.owner()` live read; zero is a valid argument (disables the path)
+- `vaultAuthority()` — live `vault.owner()` read for setup UI
+- On depeg: calls `adapter.onDepeg(coin, compositeScore)`; treats `marketsCapped == 0` as pause failure → hold released, destination FAILED
+- On recovery: calls `adapter.onRecovery(coin)` instead of `vault.unpause()` / `vault.unpauseDeposits()`
+- `vaultFrozen` check for Morpho path uses hold presence (`_coinHoldId != 0` or `activeHoldCount == 0`) rather than `vault.paused()`
+
+**`test/morpho-sentinel.test.js`** — 26 tests (T-1 through T-23), all passing.
+
+---
+
+### 5.2 Setup checklist (must be completed before a depeg can trigger)
+
+1. **Deploy `MorphoSentinelAdapter`** pointing at the target Morpho vault address.
+2. **Verify `vaultAuthority()`** — call `adapter.vaultAuthority()` and confirm it returns your address before proceeding. If it returns `address(0)` the vault does not implement `owner()` and this adapter cannot be used.
+3. **Grant sentinel role** — vault owner calls `vault.setIsSentinel(adapter, true)`.
+4. **Set the receiver** — vault owner calls `adapter.setReceiver(receiverAddress)`.
+5. **Register markets** — vault owner calls `adapter.registerMarkets(coin, [...entries...])`. Each `MarketEntry.marketData` is `abi.encode(MarketParams)` where `collateralToken` must equal `coin`; the call reverts `CollateralMismatch` otherwise.
+6. **Wire the adapter to the receiver** — vault owner calls `receiver.setMorphoAdapter(adapter)`. This requires the caller to be `vault.owner()` at the time of the call; if ownership has transferred since step 2, re-verify with `receiver.vaultAuthority()` first.
+7. **Register exposure** — StableGuard admin calls `ExposureRegistry.registerExposure(vault, bytes32(uint256(uint160(coinAddress))))`. **Without this step the receiver will not acquire a hold or invoke the adapter on depeg.** See §5.3.
+8. **(Optional) Tune threshold** — vault owner calls `adapter.setCriticalThreshold(2)` to trigger on score ≥ 2 instead of the default 3. Values 0 and 1 are rejected.
+
+> **Important:** steps 3–6 require the vault owner's key. Steps 2 and 6 use a live `vault.owner()` read — they reflect the current owner at the time of the call, not the owner at deploy time. If vault ownership is transferred after setup, `receiver.setMorphoAdapter` will require the new owner's signature.
+
+---
+
+### 5.3 ExposureRegistry control note
+
+`ExposureRegistry` remains under StableGuard admin control — only an address holding `GOVERNANCE_ROLE` on the registry (currently the StableGuard deployment key) can call `registerExposure` or `revokeExposure`. This is intentional: the exposure gate is the last check before a vault hold is acquired, and StableGuard must be able to add or revoke vault coverage without requiring the customer's signature on each change.
+
+Consequence: a Morpho vault integrated via `MorphoSentinelAdapter` is not fully armed until the StableGuard admin completes setup step 7 above. The customer controls steps 1–6 (and their Morpho vault) entirely; step 7 is the one point where StableGuard admin action is required.

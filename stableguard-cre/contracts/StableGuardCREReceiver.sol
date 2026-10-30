@@ -7,6 +7,15 @@ interface IExposureRegistry {
     function vaultFreezeMode(address vault) external view returns (FreezeMode);
 }
 
+interface IMorphoSentinelAdapter {
+    function onDepeg(address coin, uint8 score) external returns (uint256 marketsCapped);
+    function onRecovery(address coin) external;
+}
+
+interface IVaultOwner {
+    function owner() external view returns (address);
+}
+
 interface IPausable {
     function pause() external;
     function unpause() external;
@@ -123,6 +132,7 @@ contract StableGuardCREReceiver {
     address public expectedWorkflowOwner;   // zero = skip check
     bytes32 public expectedWorkflowId;      // zero = skip check
     address public overrideModule;          // CustomerOverrideModule; zero = feature disabled
+    address public morphoAdapter;           // MorphoSentinelAdapter; zero = standard vault path
 
     // Per-(coin,vault) hold tracking — vault axis future-proofs multi-coin receivers
     mapping(address => mapping(address => bytes32)) private _coinHoldId; // coin => vault => holdId
@@ -167,6 +177,7 @@ contract StableGuardCREReceiver {
     event WorkflowOwnerSet(address indexed previousOwner, address indexed newOwner);
     event WorkflowIdSet(bytes32 indexed previousId, bytes32 indexed newId);
     event OverrideModuleSet(address indexed previousModule, address indexed newModule);
+    event MorphoAdapterSet(address indexed previousAdapter, address indexed newAdapter);
     event EarlyUnlockExecuted(address indexed coin, address indexed vault);
 
     error UnauthorizedForwarder(address caller);
@@ -228,6 +239,24 @@ contract StableGuardCREReceiver {
         overrideModule = module;
     }
 
+    // Auth: vault's current owner() — the Morpho vault owner, not the StableGuard admin.
+    // Passing address(0) disables the Morpho path and restores standard IPausable behaviour.
+    function setMorphoAdapter(address adapter) external {
+        address vaultOwner_;
+        try IVaultOwner(vault).owner() returns (address o) { vaultOwner_ = o; }
+        catch { revert Unauthorized(); }
+        if (msg.sender != vaultOwner_) revert Unauthorized();
+        emit MorphoAdapterSet(morphoAdapter, adapter);
+        morphoAdapter = adapter;
+    }
+
+    /// Returns the vault's current owner() for the setup checklist UI.
+    /// Returns address(0) when the vault does not implement owner().
+    function vaultAuthority() external view returns (address) {
+        try IVaultOwner(vault).owner() returns (address o) { return o; }
+        catch { return address(0); }
+    }
+
     // ── executeEarlyUnlock ────────────────────────────────────────────────────
     // Called by CustomerOverrideModule after it has already released the ledger
     // hold via releaseByOverride.  Clears local hold tracking, unfreezes the
@@ -243,16 +272,23 @@ contract StableGuardCREReceiver {
 
         // Unfreeze vault if the ledger confirms no remaining holds
         if (holdLedger.activeHoldCount(vault) == 0) {
-            if (IPausable(vault).paused()) {
-                try IPausable(vault).unpause() { }
+            if (morphoAdapter != address(0)) {
+                try IMorphoSentinelAdapter(morphoAdapter).onRecovery(coin) { }
                 catch (bytes memory reason) {
                     emit VaultUnpauseFailed(vault, sym, reason);
                 }
-            }
-            if (IPausable(vault).depositsFrozen()) {
-                try IPausable(vault).unpauseDeposits() { }
-                catch (bytes memory reason) {
-                    emit VaultUnpauseFailed(vault, sym, reason);
+            } else {
+                if (IPausable(vault).paused()) {
+                    try IPausable(vault).unpause() { }
+                    catch (bytes memory reason) {
+                        emit VaultUnpauseFailed(vault, sym, reason);
+                    }
+                }
+                if (IPausable(vault).depositsFrozen()) {
+                    try IPausable(vault).unpauseDeposits() { }
+                    catch (bytes memory reason) {
+                        emit VaultUnpauseFailed(vault, sym, reason);
+                    }
                 }
             }
         }
@@ -345,6 +381,7 @@ contract StableGuardCREReceiver {
 
         emit DepegReport(idx, compositeScore, marketStress, observedAt);
 
+        bool isMorpho = morphoAdapter != address(0);
         for (uint256 i = 0; i < coins.length; i++) {
             address coin  = coins[i];
             uint8   level = signalLevels[i];
@@ -396,7 +433,9 @@ contract StableGuardCREReceiver {
                 // No active override hold — normal recovery flow.
                 // Works for both PENDING and HOLD_PAUSED dest states:
                 // HOLD_PAUSED → COMPLETE is a valid destinationCallback transition.
-                bool vaultFrozen = IPausable(vault).paused() || IPausable(vault).depositsFrozen();
+                bool vaultFrozen = isMorpho
+                    ? (_coinHoldId[coin][vault] != bytes32(0) || holdLedger.activeHoldCount(vault) == 0)
+                    : (IPausable(vault).paused() || IPausable(vault).depositsFrozen());
                 if (vaultFrozen && (_coinHoldId[coin][vault] != bytes32(0) || holdLedger.activeHoldCount(vault) == 0)) {
                     bytes32 hId = _coinHoldId[coin][vault];
                     bool holdReleased = false;
@@ -421,22 +460,29 @@ contract StableGuardCREReceiver {
                     }
 
                     if (vaultFullyReleased) {
-                        // Unfreeze based on actual vault state, not the configured freeze mode.
-                        // Handles mid-incident mode changes: vault.paused() / depositsFrozen()
-                        // reflect what was applied, not what mode is currently configured.
-                        if (IPausable(vault).paused()) {
-                            try IPausable(vault).unpause() { }
+                        if (isMorpho) {
+                            try IMorphoSentinelAdapter(morphoAdapter).onRecovery(coin) { }
                             catch (bytes memory reason) {
                                 emit VaultUnpauseFailed(vault, sym, reason);
                             }
-                        }
-                        if (IPausable(vault).depositsFrozen()) {
-                            try IPausable(vault).unpauseDeposits() { }
-                            catch (bytes memory reason) {
-                                emit VaultUnpauseFailed(vault, sym, reason);
+                        } else {
+                            // Unfreeze based on actual vault state, not the configured freeze mode.
+                            // Handles mid-incident mode changes: vault.paused() / depositsFrozen()
+                            // reflect what was applied, not what mode is currently configured.
+                            if (IPausable(vault).paused()) {
+                                try IPausable(vault).unpause() { }
+                                catch (bytes memory reason) {
+                                    emit VaultUnpauseFailed(vault, sym, reason);
+                                }
+                            }
+                            if (IPausable(vault).depositsFrozen()) {
+                                try IPausable(vault).unpauseDeposits() { }
+                                catch (bytes memory reason) {
+                                    emit VaultUnpauseFailed(vault, sym, reason);
+                                }
                             }
                         }
-                    } else if (holdLedger.activeHoldCount(vault) > 0) {
+                    } else if (!isMorpho && holdLedger.activeHoldCount(vault) > 0) {
                         // Partial release / downgrade: remaining holds only require
                         // DEPOSIT_ONLY_FREEZE but vault is currently fully paused.
                         // Step down: remove the full pause then apply the lighter deposit freeze.
@@ -460,7 +506,9 @@ contract StableGuardCREReceiver {
                     // so re-reading confirms whether they succeeded.
                     bool unpaused = !vaultFullyReleased;
                     if (vaultFullyReleased) {
-                        unpaused = !IPausable(vault).paused() && !IPausable(vault).depositsFrozen();
+                        unpaused = isMorpho
+                            ? true
+                            : (!IPausable(vault).paused() && !IPausable(vault).depositsFrozen());
                     }
 
                     if (!holdReleased) {
@@ -496,7 +544,7 @@ contract StableGuardCREReceiver {
             // Fires when the prior PROTECTED event expired before stableCount
             // reached stabilityWindow. The vault is still paused and needs
             // a fresh PROTECTED event to re-arm auto-recovery.
-            if (eventId == bytes32(0) && _coinHoldId[coin][vault] != bytes32(0) && (IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
+            if (eventId == bytes32(0) && _coinHoldId[coin][vault] != bytes32(0) && (isMorpho || IPausable(vault).paused() || IPausable(vault).depositsFrozen())) {
                 IDepegEventRegistry.DestinationInput[] memory resumeDests =
                     new IDepegEventRegistry.DestinationInput[](1);
                 resumeDests[0] = IDepegEventRegistry.DestinationInput({
@@ -539,7 +587,9 @@ contract StableGuardCREReceiver {
             // Eliminates the orphaned-pause state that arises when acquire() throws after
             // pause() has already executed: vault frozen, no hold on record, next report
             // calls pause() again on an already-paused vault.
-            IExposureRegistry.FreezeMode freezeMode = exposureRegistry.vaultFreezeMode(vault);
+            IExposureRegistry.FreezeMode freezeMode = isMorpho
+                ? IExposureRegistry.FreezeMode.DEPOSIT_ONLY_FREEZE
+                : exposureRegistry.vaultFreezeMode(vault);
             bool holdAcquired = false;
             bytes32 acquiredHoldId;
             try holdLedger.acquire(vault, bytes32(eventId), sym, IProtectionHoldLedger.FreezeMode(uint8(freezeMode)))
@@ -557,23 +607,35 @@ contract StableGuardCREReceiver {
             // corresponding freeze.
             bool pauseResult = false;
             if (holdAcquired) {
-                bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
-                    ? IPausable(vault).paused()
-                    : IPausable(vault).depositsFrozen();
-
-                if (holdLedger.activeHoldCount(vault) > 1 && alreadyFrozen) {
-                    pauseResult = true;
-                } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
-                    try IPausable(vault).pause() {
-                        pauseResult = true;
+                if (isMorpho) {
+                    // Morpho path: zero caps and deallocate via the sentinel adapter.
+                    // marketsCapped == 0 means nothing was protected; treat as pause failure.
+                    try IMorphoSentinelAdapter(morphoAdapter).onDepeg(coin, compositeScore)
+                        returns (uint256 marketsCapped)
+                    {
+                        pauseResult = marketsCapped > 0;
                     } catch (bytes memory reason) {
                         emit VaultPauseFailed(vault, sym, reason);
                     }
                 } else {
-                    try IPausable(vault).pauseDeposits() {
+                    bool alreadyFrozen = freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE
+                        ? IPausable(vault).paused()
+                        : IPausable(vault).depositsFrozen();
+
+                    if (holdLedger.activeHoldCount(vault) > 1 && alreadyFrozen) {
                         pauseResult = true;
-                    } catch (bytes memory reason) {
-                        emit VaultPauseFailed(vault, sym, reason);
+                    } else if (freezeMode == IExposureRegistry.FreezeMode.FULL_FREEZE) {
+                        try IPausable(vault).pause() {
+                            pauseResult = true;
+                        } catch (bytes memory reason) {
+                            emit VaultPauseFailed(vault, sym, reason);
+                        }
+                    } else {
+                        try IPausable(vault).pauseDeposits() {
+                            pauseResult = true;
+                        } catch (bytes memory reason) {
+                            emit VaultPauseFailed(vault, sym, reason);
+                        }
                     }
                 }
 
