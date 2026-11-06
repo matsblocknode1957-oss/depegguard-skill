@@ -630,4 +630,75 @@ describe("StableGuardCREReceiver + MorphoSentinelAdapter integration", function 
         await receiver.connect(newVaultOwner).setMorphoAdapter(await adapter2.getAddress());
         expect(await receiver.morphoAdapter()).to.equal(await adapter2.getAddress());
     });
+
+    // ── T-25: L-03 — receiver passes per-coin level, not compositeScore, to onDepeg ──
+
+    it("T-25 (L-03): receiver passes per-coin level to adapter — level=3 caps when compositeScore=2 would not", async function () {
+        // Bring event to WATCH
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coinAddr], [1], 1));
+
+        // Bring event to CONFIRMED_DEPEG via level=2; adapter receives level=2 < criticalThreshold=3
+        // → onDepeg returns 0 → hold released → event FAILED (terminal)
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coinAddr], [2], 2));
+
+        // Final report: coin level=3 (at criticalThreshold=3), compositeScore=2 (below criticalThreshold).
+        // Before L-03 fix: onDepeg(coin, compositeScore=2) → 0 → no caps zeroed → FAILED
+        // After  L-03 fix: onDepeg(coin, level=3)          → caps zeroed → destination COMPLETE
+        const tx = await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coinAddr], [3], 2));
+        const receipt = await tx.wait();
+
+        // MorphoCapsZeroed must fire with marketsCapped=1 (level=3 met criticalThreshold=3)
+        const zeroedEvents = findEvent(receipt, adapter.interface, "MorphoCapsZeroed");
+        expect(zeroedEvents.length).to.equal(1, "MorphoCapsZeroed must be emitted");
+        expect(zeroedEvents[0].args.marketsCapped).to.equal(1n,
+            "one market must be capped — proves level (not compositeScore) was used");
+
+        // No VaultPauseFailed — caps zeroed cleanly
+        const pauseFailedEvents = findEvent(receipt, receiver.interface, "VaultPauseFailed");
+        expect(pauseFailedEvents.length).to.equal(0, "VaultPauseFailed must not fire");
+    });
+
+    // ── T-26: M-01 — setMorphoAdapter blocked while active hold exists ───────
+
+    it("T-26 (M-01-a): setMorphoAdapter reverts ActiveHoldsExist while vault has an active hold", async function () {
+        // Three-report sequence to reach PROTECTED with one active hold
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [1], 1));
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [2], 2));
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [3], 3));
+
+        expect(await holdLedger.activeHoldCount(await morphoVault.getAddress())).to.equal(1n);
+
+        // setMorphoAdapter must revert while the vault hold is live
+        await expect(
+            receiver.connect(vaultOwner).setMorphoAdapter(ethers.ZeroAddress)
+        ).to.be.revertedWithCustomError(receiver, "ActiveHoldsExist");
+    });
+
+    // ── T-27: M-01 — setMorphoAdapter succeeds after recovery (hold released) ─
+
+    it("T-27 (M-01-b): setMorphoAdapter succeeds after recovery releases the hold", async function () {
+        // Freeze vault (reports at 1, 2, 3)
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [1], 1));
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [2], 2));
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [3], 3));
+
+        // Run stability window to trigger recovery and release the hold
+        for (let i = 0; i < STABILITY_WINDOW; i++) {
+            await receiver.connect(forwarder).onReport("0x", encodeReport([coinAddr], [0], 0));
+        }
+
+        expect(await holdLedger.activeHoldCount(await morphoVault.getAddress())).to.equal(0n,
+            "hold must be released after recovery");
+
+        // setMorphoAdapter must now succeed
+        const AdapterFactory = await ethers.getContractFactory("MorphoSentinelAdapter");
+        const newAdapter = await AdapterFactory.deploy(await morphoVault.getAddress());
+        await expect(
+            receiver.connect(vaultOwner).setMorphoAdapter(await newAdapter.getAddress())
+        ).to.emit(receiver, "MorphoAdapterSet");
+        expect(await receiver.morphoAdapter()).to.equal(await newAdapter.getAddress());
+    });
 });

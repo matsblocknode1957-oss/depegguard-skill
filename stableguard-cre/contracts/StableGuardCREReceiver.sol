@@ -77,6 +77,7 @@ interface ICustomerOverrideModule {
         uint8   score
     ) external;
     function isHoldActive(address coin, address vault) external view returns (bool);
+    function isSuppressed(bytes32 rootIncidentId, address vault, uint8 score) external view returns (bool);
 }
 
 /**
@@ -179,6 +180,7 @@ contract StableGuardCREReceiver {
     event OverrideModuleSet(address indexed previousModule, address indexed newModule);
     event MorphoAdapterSet(address indexed previousAdapter, address indexed newAdapter);
     event EarlyUnlockExecuted(address indexed coin, address indexed vault);
+    event ProtectionSuppressed(address indexed coin, address indexed vault, bytes32 indexed rootIncidentId);
 
     error UnauthorizedForwarder(address caller);
     error ReportTooOld(uint256 observedAt, uint256 blockTimestamp, uint256 maxAge);
@@ -190,6 +192,7 @@ contract StableGuardCREReceiver {
     error Unauthorized();
     error UnauthorizedOverrideModule(address caller);
     error VaultMismatch(address given, address expected);
+    error ActiveHoldsExist(address vault);
 
     constructor(
         address _forwarder,
@@ -241,11 +244,13 @@ contract StableGuardCREReceiver {
 
     // Auth: vault's current owner() — the Morpho vault owner, not the StableGuard admin.
     // Passing address(0) disables the Morpho path and restores standard IPausable behaviour.
+    // M-01: reverts ActiveHoldsExist while any active hold remains on the vault.
     function setMorphoAdapter(address adapter) external {
         address vaultOwner_;
         try IVaultOwner(vault).owner() returns (address o) { vaultOwner_ = o; }
         catch { revert Unauthorized(); }
         if (msg.sender != vaultOwner_) revert Unauthorized();
+        if (holdLedger.activeHoldCount(vault) > 0) revert ActiveHoldsExist(vault);
         emit MorphoAdapterSet(morphoAdapter, adapter);
         morphoAdapter = adapter;
     }
@@ -307,6 +312,12 @@ contract StableGuardCREReceiver {
         emit EarlyUnlockExecuted(coin, vault);
     }
 
+    /// @notice Receives and processes a depeg report from the StableGuard CRE workflow.
+    /// @dev    Per-coin stale-skip: each coin's observedAt must exceed
+    ///         lastAcceptedObservedAt[coin].  Stale coins emit CoinReportSkippedStale and
+    ///         are skipped without failing the whole report.  Off-chain monitors MUST watch
+    ///         for CoinReportSkippedStale — a coin stuck below the last accepted timestamp
+    ///         will never trigger protection until the timestamp advances past it.  (M-05)
     function onReport(bytes calldata metadata, bytes calldata report) external {
         if (msg.sender != forwarder) revert UnauthorizedForwarder(msg.sender);
 
@@ -569,6 +580,19 @@ contract StableGuardCREReceiver {
                 continue;
             }
 
+            // H-04: suppression gate — skip protection if earlyUnlock suppressed this vault
+            // at or above the current severity (per-incident or vault-level suppression).
+            {
+                address om = overrideModule;
+                if (om != address(0)) {
+                    bytes32 rootId = eventRegistry.getEventRootIncidentId(eventId);
+                    if (ICustomerOverrideModule(om).isSuppressed(rootId, vault, level)) {
+                        emit ProtectionSuppressed(coin, vault, rootId);
+                        continue;
+                    }
+                }
+            }
+
             // Call 2: CONFIRMED_DEPEG → PROTECTION_PENDING; silent catch (may already
             // be in-flight if a previous cycle fired before this callback arrived)
             IDepegEventRegistry.DestinationInput[] memory dests =
@@ -610,7 +634,7 @@ contract StableGuardCREReceiver {
                 if (isMorpho) {
                     // Morpho path: zero caps and deallocate via the sentinel adapter.
                     // marketsCapped == 0 means nothing was protected; treat as pause failure.
-                    try IMorphoSentinelAdapter(morphoAdapter).onDepeg(coin, compositeScore)
+                    try IMorphoSentinelAdapter(morphoAdapter).onDepeg(coin, level)
                         returns (uint256 marketsCapped)
                     {
                         pauseResult = marketsCapped > 0;

@@ -60,6 +60,7 @@ contract CustomerOverrideModule {
         uint256 holdUntil;      // 0 until placeHold is called
         uint8   severityAtHold;
         bool    registered;
+        bool    ownerRenewUsed; // H-01: true once a single Safe owner has renewed; reset by Safe-driven renewal
     }
 
     // coin → vault → override hold slot
@@ -72,6 +73,8 @@ contract CustomerOverrideModule {
 
     // rootIncidentId → vault → suppression record
     mapping(bytes32 => mapping(address => Suppression)) private _suppressions;
+    // vault → vault-level suppression (H-04: set by earlyUnlock so fresh events are also suppressed)
+    mapping(address => Suppression) private _vaultSuppressions;
 
     // ── Events ────────────────────────────────────────────────────────────────
 
@@ -116,6 +119,7 @@ contract CustomerOverrideModule {
     error DurationExceedsMax(uint256 duration, uint256 maxAllowed);
     error RootIncidentMismatch(bytes32 given, bytes32 stored);
     error ReceiverNotSet(address vault);
+    error OwnerRenewLimitReached();
 
     // ── Constructor ───────────────────────────────────────────────────────────
 
@@ -203,7 +207,8 @@ contract CustomerOverrideModule {
             rootIncidentId: rootIncidentId,
             holdUntil:      0,
             severityAtHold: score,
-            registered:     true
+            registered:     true,
+            ownerRenewUsed: false
         });
         emit HoldSlotRegistered(coin, vault, rootIncidentId);
     }
@@ -221,7 +226,8 @@ contract CustomerOverrideModule {
         if (h.holdUntil > 0 && block.timestamp < h.holdUntil) revert HoldAlreadyPlaced();
 
         uint256 holdUntil = block.timestamp + maxHoldDuration;
-        h.holdUntil = holdUntil;
+        h.holdUntil      = holdUntil;
+        h.ownerRenewUsed = false;
         emit HoldPlaced(coin, vault, msg.sender, holdUntil);
     }
 
@@ -243,8 +249,11 @@ contract CustomerOverrideModule {
     function isSuppressed(bytes32 rootIncidentId, address vault, uint8 score)
         external view returns (bool)
     {
-        Suppression storage s = _suppressions[rootIncidentId][vault];
-        return block.timestamp < s.suppressUntil && score <= s.severityAtUnlock;
+        Suppression storage s1 = _suppressions[rootIncidentId][vault];
+        if (block.timestamp < s1.suppressUntil && score <= s1.severityAtUnlock) return true;
+        // H-04: also check vault-level suppression so fresh events (new rootIncidentId) are caught
+        Suppression storage s2 = _vaultSuppressions[vault];
+        return block.timestamp < s2.suppressUntil && score <= s2.severityAtUnlock;
     }
 
     // ── getSuppression ────────────────────────────────────────────────────────
@@ -282,12 +291,13 @@ contract CustomerOverrideModule {
         if (recv == address(0)) revert ReceiverNotSet(vault);
         IExecuteEarlyUnlock(recv).executeEarlyUnlock(coin, vault);
 
-        // Record suppression so this incident can't re-freeze at or below this severity
+        // Record suppression — both per-incident and vault-level (H-04).
+        // Per-incident covers resumeProtectionTracking (same rootIncidentId reused).
+        // Vault-level covers fresh events after earlyUnlock (new rootIncidentId).
         uint256 suppressUntil = block.timestamp + suppressionWindow;
-        _suppressions[rootIncidentId][vault] = Suppression({
-            suppressUntil:    suppressUntil,
-            severityAtUnlock: severity
-        });
+        Suppression memory sup = Suppression({ suppressUntil: suppressUntil, severityAtUnlock: severity });
+        _suppressions[rootIncidentId][vault] = sup;
+        _vaultSuppressions[vault]            = sup;
         emit HoldEarlyUnlocked(coin, vault, rootIncidentId, suppressUntil);
     }
 
@@ -310,15 +320,26 @@ contract CustomerOverrideModule {
 
     // ── renewHold ─────────────────────────────────────────────────────────────
     // Resets holdUntil to exactly now + newDuration (not additive).
-    // Capped at maxHoldDuration.  Callable by any single owner of the override Safe.
+    // Capped at maxHoldDuration.
+    //
+    // H-01: a single Safe owner may renew at most once per hold lifecycle.
+    //       The full Safe (msg.sender == overrideAuthority[vault]) may always renew
+    //       and resets the owner-renew allowance so owners get one more renewal.
 
     function renewHold(address coin, address vault, uint256 newDuration) external {
         address authority = overrideAuthority[vault];
-        if (!ISafe(authority).isOwner(msg.sender)) revert Unauthorized();
+        bool    isSafe    = msg.sender == authority;
+        if (!isSafe && !ISafe(authority).isOwner(msg.sender)) revert Unauthorized();
         if (newDuration > maxHoldDuration) revert DurationExceedsMax(newDuration, maxHoldDuration);
-
         if (!isHoldActive(coin, vault)) revert HoldNotActive();
+
         OverrideHold storage h = overrideHolds[coin][vault];
+        if (isSafe) {
+            h.ownerRenewUsed = false;
+        } else {
+            if (h.ownerRenewUsed) revert OwnerRenewLimitReached();
+            h.ownerRenewUsed = true;
+        }
 
         uint256 newHoldUntil = block.timestamp + newDuration;
         h.holdUntil = newHoldUntil;

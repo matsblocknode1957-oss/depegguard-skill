@@ -79,6 +79,7 @@ contract ProtectionHoldLedger {
     event CoordinatorTransferred(address indexed oldCoordinator, address indexed newCoordinator);
     event GovernanceTransferred(address indexed oldGovernance, address indexed newGovernance);
     event VaultModuleApproved(address indexed vault, address indexed module);
+    event VaultModuleRevoked(address indexed vault, address indexed previousModule);
 
     // ── Errors ────────────────────────────────────────────────────────────────
 
@@ -203,11 +204,16 @@ contract ProtectionHoldLedger {
     // Callable only by an address holding GOVERNANCE_ROLE on `vault` (the customer).
     // StableGuard governance has no path to set or change this.
 
+    // M-02: passing address(0) revokes the approved module; emits VaultModuleRevoked.
     function approveVaultModule(address vault, address module) external {
         if (!IAccessControl(vault).hasRole(GOVERNANCE_ROLE, msg.sender)) revert Unauthorized();
-        if (module == address(0)) revert ZeroAddress();
-        emit VaultModuleApproved(vault, module);
+        address previous = vaultApprovedModule[vault];
         vaultApprovedModule[vault] = module;
+        if (module == address(0)) {
+            emit VaultModuleRevoked(vault, previous);
+        } else {
+            emit VaultModuleApproved(vault, module);
+        }
     }
 
     // ── releaseByOverride ─────────────────────────────────────────────────────

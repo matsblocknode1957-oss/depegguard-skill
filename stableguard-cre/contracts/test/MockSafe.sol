@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 interface ICustomerOverrideModule {
     function earlyUnlock(address coin, address vault, bytes32 rootIncidentId) external;
     function cancelHold(address coin, address vault) external;
+    function renewHold(address coin, address vault, uint256 newDuration) external;
 }
 
 /// @dev Minimal Safe stand-in for tests.  Multiple EOA owners can be added;
@@ -38,5 +39,15 @@ contract MockSafe {
     ) external {
         require(isOwner[msg.sender], "MockSafe: not owner");
         ICustomerOverrideModule(module).cancelHold(coin, vault);
+    }
+
+    function callRenewHold(
+        address module,
+        address coin,
+        address vault,
+        uint256 newDuration
+    ) external {
+        require(isOwner[msg.sender], "MockSafe: not owner");
+        ICustomerOverrideModule(module).renewHold(coin, vault, newDuration);
     }
 }

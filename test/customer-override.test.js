@@ -4,6 +4,12 @@ const { ethers } = require("hardhat");
 const { expect } = require("chai");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
+function findEvent(receipt, iface, name) {
+    return receipt.logs
+        .map(l => { try { return iface.parseLog(l); } catch { return null; } })
+        .filter(e => e && e.name === name);
+}
+
 describe("CustomerOverrideModule — 25 edge cases", function () {
 
     // ── Constants ─────────────────────────────────────────────────────────────
@@ -693,6 +699,216 @@ describe("CustomerOverrideModule — 25 edge cases", function () {
         await expect(
             holdLedger.connect(admin).releaseByOverride(ledgerHoldId)
         ).to.be.revertedWithCustomError(holdLedger, "Unauthorized");
+    });
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // H-01 tests — single-owner renewHold limit
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // ── Test 27 ───────────────────────────────────────────────────────────────
+    it("27 (H-01-a) — second owner renewHold reverts OwnerRenewLimitReached", async function () {
+        await freezeVault();
+        await overrideModule.connect(safeOwner).placeHold(coin.address, await vault.getAddress());
+
+        const vaultAddr = await vault.getAddress();
+
+        // First owner renewal succeeds
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.emit(overrideModule, "HoldRenewed");
+
+        // Second owner renewal reverts OwnerRenewLimitReached
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.be.revertedWithCustomError(overrideModule, "OwnerRenewLimitReached");
+    });
+
+    // ── Test 28 ───────────────────────────────────────────────────────────────
+    it("28 (H-01-b) — Safe-driven renewal resets owner allowance; owner may renew once more", async function () {
+        await freezeVault();
+        await overrideModule.connect(safeOwner).placeHold(coin.address, await vault.getAddress());
+
+        const vaultAddr = await vault.getAddress();
+
+        // Owner uses up their one renewal
+        await overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n);
+
+        // Second owner renewal reverts
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.be.revertedWithCustomError(overrideModule, "OwnerRenewLimitReached");
+
+        // Safe-driven renewal succeeds and resets the flag
+        await expect(
+            safeContract.connect(safeOwner).callRenewHold(
+                await overrideModule.getAddress(), coin.address, vaultAddr, 1800n
+            )
+        ).to.emit(overrideModule, "HoldRenewed");
+
+        // Now the owner can renew once more
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.emit(overrideModule, "HoldRenewed");
+    });
+
+    // ── Test 29 ───────────────────────────────────────────────────────────────
+    it("29 (H-01-c) — placeHold resets ownerRenewUsed; owner can renew after hold re-activation", async function () {
+        await freezeVault();
+        const vaultAddr = await vault.getAddress();
+
+        await overrideModule.connect(safeOwner).placeHold(coin.address, vaultAddr);
+        // Use up the one-owner renewal
+        await overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n);
+
+        // Second renewal reverts
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.be.revertedWithCustomError(overrideModule, "OwnerRenewLimitReached");
+
+        // Advance past the hold TTL so the hold expires
+        await time.increase(Number(MAX_HOLD_DURATION) + 1);
+        expect(await overrideModule.isHoldActive(coin.address, vaultAddr)).to.equal(false);
+
+        // placeHold again (hold expired — the HoldAlreadyPlaced guard no longer fires)
+        await overrideModule.connect(safeOwner).placeHold(coin.address, vaultAddr);
+
+        // Owner can renew once more after re-activation (ownerRenewUsed was reset by placeHold)
+        await expect(
+            overrideModule.connect(safeOwner).renewHold(coin.address, vaultAddr, 1800n)
+        ).to.emit(overrideModule, "HoldRenewed");
+    });
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // H-04 tests — suppression gate enforced on-chain
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // Helper: freeze → place hold → stability window → earlyUnlock → one stable report → NORMAL
+    async function earlyUnlockAndAdvanceToNormal() {
+        await advanceToRecoveryWithHold();
+        await time.increase(Number(RECOVERY_COOLDOWN) + 1);
+
+        const coinAddr  = coin.address;
+        const vaultAddr = await vault.getAddress();
+        const h = await overrideModule.overrideHolds(coinAddr, vaultAddr);
+
+        await safeContract.connect(safeOwner).callEarlyUnlock(
+            await overrideModule.getAddress(), coinAddr, vaultAddr, h.rootIncidentId
+        );
+        expect(await vault.paused()).to.equal(false, "vault must be unfrozen after earlyUnlock");
+
+        // One stable report drives the receiver to call finalizeRecovery → NORMAL
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coin.address], [0], 0));
+    }
+
+    // ── Test 30 ───────────────────────────────────────────────────────────────
+    it("30 (H-04-a) — after earlyUnlock, same severity does NOT re-freeze vault (ProtectionSuppressed emitted)", async function () {
+        await earlyUnlockAndAdvanceToNormal();
+
+        const vaultAddr = await vault.getAddress();
+
+        // New depeg at the same severity that was earlyUnlocked (CONFIRMED_THRESHOLD=2)
+        const tx = await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin.address], [CONFIRMED_THRESHOLD], CONFIRMED_THRESHOLD));
+        const receipt = await tx.wait();
+
+        const suppressed = findEvent(receipt, receiver.interface, "ProtectionSuppressed");
+        expect(suppressed.length).to.equal(1, "ProtectionSuppressed must be emitted");
+
+        expect(await vault.paused()).to.equal(false, "vault must NOT re-freeze at same severity");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(0n);
+    });
+
+    // ── Test 31 ───────────────────────────────────────────────────────────────
+    it("31 (H-04-b) — after earlyUnlock, HIGHER severity DOES re-freeze vault", async function () {
+        await earlyUnlockAndAdvanceToNormal();
+
+        const vaultAddr = await vault.getAddress();
+
+        // Level 3 > severityAtUnlock=2 — suppression does not apply
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin.address], [3], 3));
+
+        expect(await vault.paused()).to.equal(true, "vault MUST re-freeze at higher severity");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(1n);
+    });
+
+    // ── Test 32 ───────────────────────────────────────────────────────────────
+    it("32 (H-04-c) — after suppressionWindow expires, normal protection resumes", async function () {
+        await advanceToRecoveryWithHold();
+        await time.increase(Number(RECOVERY_COOLDOWN) + 1);
+
+        const coinAddr  = coin.address;
+        const vaultAddr = await vault.getAddress();
+        const h = await overrideModule.overrideHolds(coinAddr, vaultAddr);
+
+        await safeContract.connect(safeOwner).callEarlyUnlock(
+            await overrideModule.getAddress(), coinAddr, vaultAddr, h.rootIncidentId
+        );
+
+        // Advance past the suppression window
+        await time.increase(Number(SUPPRESSION_WINDOW) + 1);
+
+        // One stable report to advance event to NORMAL (finalizeRecovery fires)
+        await receiver.connect(forwarder).onReport("0x", encodeReport([coin.address], [0], 0));
+
+        // New depeg at same severity — suppression expired; vault must freeze
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin.address], [CONFIRMED_THRESHOLD], CONFIRMED_THRESHOLD));
+
+        expect(await vault.paused()).to.equal(true,
+            "vault must re-freeze after suppressionWindow expires");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(1n);
+    });
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // M-02 tests — revoke module
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // ── Test 33 ───────────────────────────────────────────────────────────────
+    it("33 (M-02-a) — approveVaultModule(vault, address(0)) emits VaultModuleRevoked; earlyUnlock reverts (releaseByOverride Unauthorized)", async function () {
+        await freezeVault();
+        const vaultAddr  = await vault.getAddress();
+        const moduleAddr = await overrideModule.getAddress();
+
+        // Activate an override hold so earlyUnlock is callable
+        await overrideModule.connect(safeOwner).placeHold(coin.address, vaultAddr);
+
+        // Revoke the approved module
+        await expect(
+            holdLedger.connect(governance).approveVaultModule(vaultAddr, ethers.ZeroAddress)
+        ).to.emit(holdLedger, "VaultModuleRevoked").withArgs(vaultAddr, moduleAddr);
+
+        expect(await holdLedger.vaultApprovedModule(vaultAddr)).to.equal(ethers.ZeroAddress);
+
+        // earlyUnlock internally calls holdLedger.releaseByOverride; with module revoked it reverts
+        const hAfter = await overrideModule.overrideHolds(coin.address, vaultAddr);
+        await expect(
+            safeContract.connect(safeOwner).callEarlyUnlock(
+                moduleAddr, coin.address, vaultAddr, hAfter.rootIncidentId
+            )
+        ).to.be.reverted;
+    });
+
+    // ── Test 34 ───────────────────────────────────────────────────────────────
+    it("34 (M-02-b) — after revoke, governance can approve a new module; VaultModuleApproved emitted", async function () {
+        const vaultAddr = await vault.getAddress();
+
+        // Revoke current module
+        await holdLedger.connect(governance).approveVaultModule(vaultAddr, ethers.ZeroAddress);
+        expect(await holdLedger.vaultApprovedModule(vaultAddr)).to.equal(ethers.ZeroAddress);
+
+        // Deploy a fresh module
+        const ModuleFactory = await ethers.getContractFactory("CustomerOverrideModule");
+        const newModule = await ModuleFactory.deploy(
+            await holdLedger.getAddress(), MAX_HOLD_DURATION, SUPPRESSION_WINDOW, admin.address
+        );
+
+        // Approve the new module — VaultModuleApproved must be emitted
+        await expect(
+            holdLedger.connect(governance).approveVaultModule(vaultAddr, await newModule.getAddress())
+        ).to.emit(holdLedger, "VaultModuleApproved").withArgs(vaultAddr, await newModule.getAddress());
+
+        expect(await holdLedger.vaultApprovedModule(vaultAddr)).to.equal(await newModule.getAddress());
     });
 
 });
