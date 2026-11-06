@@ -46,7 +46,7 @@ npx hardhat run scripts/deploy-arbitrum-sepolia.js --network arbitrumSepolia
 Remove-Item Env:USE_DEMO_FORWARDER
 ```
 
-This deploys the receiver using `0xd41263567ddfead91504199b8c6c87371e83ca5d` (the MockKeystoneForwarder on Arbitrum Sepolia). The mock forwarder skips signature verification, so any address can call `report()` on it — suitable for the demo scripts but never for production.
+This deploys the receiver using `0xd41263567ddfead91504199b8c6c87371e83ca5d` (the MockKeystoneForwarder on Arbitrum Sepolia). The mock forwarder skips signature verification, so any address can call `report()` on it — suitable for the demo but never for production.
 
 **WARNING: Never use MockKeystoneForwarder on mainnet or with real user funds.**
 
@@ -74,11 +74,18 @@ The script prints each address and writes the full deployment JSON. Save `deploy
 
 ---
 
-## 2. Post-deploy role wiring
+## 2. Post-deploy wiring — ordered to run before role revocation
 
-The deploy script handles all wiring automatically. This section documents what it does and what you need to wire by hand for the optional modules.
+**Role dependency map** — every script that needs a deployer role must run before step 2f:
 
-### Wiring performed automatically by `deploy-arbitrum-sepolia.js`
+| Script | Role required |
+|---|---|
+| `register-exposure.js` | ExposureRegistry admin (deployer) |
+| `deploy-demo-contracts-arbitrum.js` | None on existing contracts; deployer is owner of new contracts |
+| `demo-wire-all.js` | GOVERNANCE_ROLE on StableGuardVault (deployer) |
+| `remediate-role-revocation.js` | **Runs last** — confirms no operational roles remain on deployer |
+
+### 2a. Wiring performed automatically by `deploy-arbitrum-sepolia.js`
 
 | Call | Why |
 |---|---|
@@ -90,21 +97,17 @@ The deploy script handles all wiring automatically. This section documents what 
 | `holdLedger.transferCoordinator(receiver)` | Receiver becomes sole coordinator |
 | `vault.grantRole(PAUSE_COORDINATOR_ROLE, receiver)` | Lets receiver call `vault.pause()` |
 
-After the deploy script completes, the deployer must hold no operational roles. Verify:
+### 2b. Register USDC exposure
 
-```powershell
-npx hardhat run scripts/remediate-role-revocation.js --network arbitrumSepolia
-```
-
-### Register USDC exposure
+Requires ExposureRegistry admin (= deployer). **Must run before 2f.**
 
 ```powershell
 npx hardhat run scripts/register-exposure.js --network arbitrumSepolia
 ```
 
-The script reads addresses from `deployments/arbitrum-sepolia.json` and verifies the signer matches the recorded deployer. No manual address edits required.
+The script reads addresses from `deployments/arbitrum-sepolia.json` and verifies the signer matches the recorded deployer.
 
-### Deploy optional demo contracts
+### 2c. Deploy demo contracts
 
 ```powershell
 npx hardhat run scripts/deploy-demo-contracts-arbitrum.js --network arbitrumSepolia
@@ -112,22 +115,42 @@ npx hardhat run scripts/deploy-demo-contracts-arbitrum.js --network arbitrumSepo
 
 Deploys MockMorphoVaultV2, MorphoSentinelAdapter, CustomerOverrideModule, TestPriceFeed, and MockSafe. Writes addresses to `deployments/arbitrum-sepolia-demo.json`.
 
-### Wire CustomerOverrideModule (standard freeze path)
+### 2d. Update `config.arbitrum-demo.json`
+
+After 2a and 2c, fill in the two `REPLACE_WITH_...` placeholders in
+`stableguard-cre/depeg-monitor/config.arbitrum-demo.json`:
+
+```json
+"consumerAddress": "<StableGuardCREReceiver from deployments/arbitrum-sepolia.json>",
+...
+"demoFeedAddress": "<TestPriceFeed from deployments/arbitrum-sepolia-demo.json>"
+```
+
+Leave `priceFeedAddress` on USDC and USDT as `REPLACE_WITH_...` — the workflow skips
+any coin whose feed starts with `REPLACE_`, so only USDC (via `demoFeedAddress`) is
+reported during the demo. The `chainSelectorName: "ethereum-testnet-sepolia-arbitrum-1"`
+and `chainSelector: "3478487238524512106"` are already correct for Arbitrum Sepolia.
+
+The CRE simulate tool writes through the chain's forwarder for that environment. For
+`ethereum-testnet-sepolia-arbitrum-1` in simulate mode this is the MockKeystoneForwarder
+(`0xd41263567ddfead91504199b8c6c87371e83ca5d`) — the same address the receiver trusts.
+
+### 2e. Wire CustomerOverrideModule
+
+Requires GOVERNANCE_ROLE on StableGuardVault (= deployer). **Must run before 2f.**
 
 ```powershell
 npx hardhat run scripts/demo-wire-all.js --network arbitrumSepolia
 ```
 
-Performs all four wiring steps in one shot:
+Performs all four wiring steps:
 
 | Call | Purpose |
 |---|---|
-| `module.setVaultAuthority(vault, mockSafe)` | Binds MockSafe as the override authority for this vault |
-| `module.setVaultReceiver(vault, receiver)` | Module calls receiver.executeEarlyUnlock on early unlock |
+| `module.setVaultAuthority(vault, mockSafe)` | Binds MockSafe as the override authority |
+| `module.setVaultReceiver(vault, receiver)` | Module calls `receiver.executeEarlyUnlock` on early unlock |
 | `receiver.setOverrideModule(module)` | Enables override path in receiver |
 | `holdLedger.approveVaultModule(vault, module)` | Grants module the right to call `releaseByOverride` |
-
-Caller must hold GOVERNANCE_ROLE on StableGuardVault (= original deployer).
 
 ### Customer Safe options — MockSafe vs Real Safe
 
@@ -135,40 +158,27 @@ Caller must hold GOVERNANCE_ROLE on StableGuardVault (= original deployer).
 
 MockSafe is deployed by `deploy-demo-contracts-arbitrum.js` with the deployer as the only owner. All demo scripts use it automatically. No Safe app, no multisig UX needed during recording.
 
-- `placeHold` and `renewHold`: call directly from the deployer EOA (MockSafe.isOwner(deployer) = true)
-- `earlyUnlock`: deployer calls `mockSafe.callEarlyUnlock(module, coin, vault, rootIncidentId)` — msg.sender is the MockSafe contract, satisfying the `overrideAuthority` check
-- Scripts: `demo-place-hold.js` and `demo-early-unlock.js` handle both steps automatically
+- `placeHold` / `renewHold`: call directly from the deployer EOA (MockSafe.isOwner(deployer) = true)
+- `earlyUnlock`: deployer calls `mockSafe.callEarlyUnlock(...)` — msg.sender is the MockSafe contract, satisfying the `overrideAuthority` check
 
 **Option B — Real Gnosis Safe (Arbitrum Sepolia, two wallets)**
 
 1. Create a Safe at app.safe.global on Arbitrum Sepolia. Add both wallet addresses as owners. Set threshold to 1 (for demos) or 2 (realistic multisig).
-2. After `deploy-demo-contracts-arbitrum.js`, call `module.setVaultAuthority(vault, <SafeAddress>)` manually or update `demo-wire-all.js` to use your Safe address.
-3. `placeHold` / `renewHold`: either wallet owner calls `module.placeHold(coin, vault)` directly (no Safe transaction needed — single-owner call).
-4. `earlyUnlock`: go to app.safe.global → New transaction → Contract interaction → `module.earlyUnlock(coin, vault, rootIncidentId)`. Both owners approve (or just one if threshold=1). The Safe contract executes the call, so msg.sender == Safe address == overrideAuthority ✓
+2. Before running `demo-wire-all.js`, edit it to use your Safe address instead of `mockSafeAddr` for `setVaultAuthority`.
+3. `placeHold` / `renewHold`: either wallet owner calls `module.placeHold(coin, vault)` directly (no Safe transaction needed).
+4. `earlyUnlock`: go to app.safe.global → New transaction → Contract interaction → `module.earlyUnlock(coin, vault, rootIncidentId)`. Approve with the required threshold. The Safe contract is msg.sender == overrideAuthority ✓
 
-**Recommendation**: Use MockSafe (Option A) for the video. It is functionally identical to a real Safe for every security property in scope; the only difference is the multisig UX, which creates dead air during recording. Add a brief voiceover explaining "In production this would be a Gnosis Safe; here we use MockSafe so a single key can demonstrate the full flow."
+**Recommendation**: Use MockSafe (Option A) for the video. Add a brief voiceover: "In production this would be a Gnosis Safe requiring multiple owners; here we use MockSafe so a single key demonstrates the full flow."
 
-### MorphoSentinelAdapter wiring (advanced — requires separate demo receiver)
+### MorphoSentinelAdapter (advanced — requires separate demo receiver)
 
-`setMorphoAdapter` authenticates via `vault.owner()`. StableGuardVault uses AccessControl (not Ownable) so `owner()` does not exist on it and `setMorphoAdapter` will revert. For a Morpho-path demo:
-
-1. Deploy a separate demo receiver with `MockMorphoVaultV2` as its vault (the mock vault implements `owner()`).
-2. Deploy fresh ExposureRegistry + DepegEventRegistry + ProtectionHoldLedger instances for that receiver (so it can become coordinator without replacing the production receiver).
-3. Wire in this order: `setIsSentinel`, `setReceiver`, `registerMarkets`, `registerExposure`, `setMorphoAdapter`.
-
-This is not part of the standard video demo but is documented here for completeness.
+`setMorphoAdapter` authenticates via `vault.owner()`. StableGuardVault uses AccessControl (not Ownable) so `owner()` is not present and `setMorphoAdapter` will revert. For a Morpho-path demo, deploy a separate receiver with MockMorphoVaultV2 as its vault (the mock implements `owner()`), plus fresh registry + ledger instances. Not part of the standard video demo.
 
 ### setExpectedWorkflowOwner / setExpectedWorkflowId
 
-Both default to zero after deploy (checks skipped). Leave at zero for the demo. If you obtain a paid CRE deployment:
+Both default to zero after deploy (checks skipped). Leave at zero for the demo. If you obtain a paid CRE deployment, set them via a one-off Hardhat script.
 
-```powershell
-# Call via Hardhat console or a one-off script:
-# receiver.setExpectedWorkflowOwner(<DON workflow owner address>)
-# receiver.setExpectedWorkflowId(<workflow ID as bytes32>)
-```
-
-### Verify all contracts on Arbiscan
+### 2f. Verify all contracts on Arbiscan
 
 Replace `<addr>` placeholders with addresses from `deployments/arbitrum-sepolia.json`.
 
@@ -189,11 +199,34 @@ npx hardhat verify --network arbitrumSepolia <StableGuardCREReceiver> `
   3478487238524512106 <holdLedger> 3600
 ```
 
+### 2g. Role revocation check — LAST wiring step
+
+Run this **after** 2b (register-exposure) and 2e (demo-wire-all) are complete.
+Both scripts require deployer roles that this script confirms are clear of operational access.
+
+```powershell
+npx hardhat run scripts/remediate-role-revocation.js --network arbitrumSepolia
+```
+
+This confirms (and revokes if still present) REPORTER_ROLE, ACTION_ROLE, and
+PAUSE_COORDINATOR_ROLE on DepegEventRegistry. Expected output: all three "already revoked".
+
+**Roles the deployer intentionally retains after this step:**
+
+| Role | Contract | Why retained |
+|---|---|---|
+| `admin` | ExposureRegistry | Governance — add/remove vault exposures |
+| `admin` | DepegEventRegistry | Governance — emergency controls (B-05) |
+| `governance` | ProtectionHoldLedger | Governance — `forceTransferCoordinator` emergency override |
+| `GOVERNANCE_ROLE` | StableGuardVault | Governance — rotate PAUSE_COORDINATOR_ROLE if needed |
+
+None of these roles can submit reports, acquire holds, or trigger freezes — only the receiver can do that.
+
 ---
 
 ## 3. Demo vault — Morpho path
 
-There is no real Morpho Vault V2 on Arbitrum Sepolia. Use MockMorphoVaultV2 (already in the repo), deployed by `deploy-demo-contracts-arbitrum.js`. It implements every interface that MorphoSentinelAdapter calls and is fully tested. Option B (deploying morpho-org/vault-v2 from source) adds hours of setup for no demo benefit.
+There is no real Morpho Vault V2 on Arbitrum Sepolia. Use MockMorphoVaultV2 (already in the repo), deployed by `deploy-demo-contracts-arbitrum.js`. It implements every interface that MorphoSentinelAdapter calls and is fully tested.
 
 ---
 
@@ -201,53 +234,38 @@ There is no real Morpho Vault V2 on Arbitrum Sepolia. Use MockMorphoVaultV2 (alr
 
 The workflow (`stableguard-cre/depeg-monitor/main.ts`) reads prices on-chain via `evmClient.callContract` calling `latestRoundData()` on a Chainlink AggregatorV3-compatible feed. No Data Streams credentials are required.
 
-### Stub mode (no chain connection)
+### Stub mode (dry run, no chain writes)
 
-`config.arbitrum-staging.json` has `"stubScenario": "depeg"`. When `stubScenario` is set, the workflow uses hardcoded offsets instead of calling any price feed. USDC is forced to 300 bps below peg (CRITICAL). Use this for local simulation:
+`config.arbitrum-staging.json` has `"stubScenario": "depeg"`. When `stubScenario` is set, the workflow uses hardcoded offsets — USDC is forced to 300 bps CRITICAL — and no on-chain reads are needed. Use this to confirm the workflow compiles and produces a report before the live demo:
 
-> **Login required**: `cre workflow simulate` calls the CRE API and requires a valid session.
-> Run `cre login` before the commands below, then re-run after logging in.
+> **Login required**: `cre workflow simulate` calls the CRE API.
+> Run `cre login` once before any simulate command.
 
 ```powershell
-# From stableguard-cre/depeg-monitor:
 Set-Location stableguard-cre\depeg-monitor
 cre workflow simulate . --target=arbitrum-staging-settings
 Set-Location ..\..
 ```
 
-### Live feed mode
+No `--broadcast` — this is a dry run only. Confirm the JSON output shows `compositeScore: 3` and `signal: "CRITICAL"` for USDC.
 
-Set `priceFeedAddress` in the config to a real Chainlink USD feed address on Arbitrum Sepolia (or the deployed TestPriceFeed address in `demoFeedAddress` for the demo). Remove or leave `stubScenario` unset.
+### Demo mode — TestPriceFeed with `--broadcast`
 
-### Demo mode — TestPriceFeed
+`config.arbitrum-demo.json` points `demoFeedAddress` at the deployed TestPriceFeed. The workflow reads that feed on-chain, computes the signal, ABI-encodes the report, and (with `--broadcast`) submits it via the CRE forwarder infrastructure to `consumerAddress` (the receiver).
 
-The TestPriceFeed contract (`stableguard-cre/contracts/test/TestPriceFeed.sol`) lets you control the price by calling `setPrice()`. The `demoFeedAddress` field in `config.arbitrum-demo.json` takes precedence over `priceFeedAddress` when set.
-
-After deploying TestPriceFeed, to stage a depeg:
-
-```powershell
-# $0.94 = 600 bps below peg → CRITICAL
-$env:PRICE="94000000"
-npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
-Remove-Item Env:PRICE
-
-# Reset to peg ($1.00 → STABLE) after the demo
-$env:RESET="1"
-npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
-Remove-Item Env:RESET
-```
-
-### Broadcasting on-chain (demo receiver)
-
-With the demo receiver (MockKeystoneForwarder), use `demo-send-report.js` — it calls `MockKeystoneForwarder.report(receiver, payload, "0x", [])` which triggers `receiver.onReport` with no signature check.
+For `chainSelectorName: "ethereum-testnet-sepolia-arbitrum-1"` the simulate tool routes writes through the MockKeystoneForwarder (`0xd41263567ddfead91504199b8c6c87371e83ca5d`), which the receiver trusts. No DON signatures are verified.
 
 ---
 
 ## 5. Demo script — alarm → freeze → customer Safe unlock → recovery
 
-Pre-requisites: `demo-wire-all.js` has been run; small USDC deposit in vault; `vault.paused()` = false.
+Pre-requisites: steps 2a–2g complete; small USDC deposit in vault; `vault.paused()` = false; `cre login` done.
 
-**Step 1 — Stage the depeg price (TestPriceFeed)**
+All `cre workflow simulate` commands run from `stableguard-cre\depeg-monitor`.
+
+---
+
+### Step 1 — Stage the depeg price (TestPriceFeed → $0.94)
 
 ```powershell
 $env:PRICE="94000000"
@@ -255,60 +273,140 @@ npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
 Remove-Item Env:PRICE
 ```
 
-**Step 2 — First CRITICAL report (registry enters WATCH)**
+TestPriceFeed now returns $0.94 = 600 bps below peg → CRITICAL when the workflow reads it.
+
+---
+
+### Step 2 — CRE simulate cycle 1: NORMAL → WATCH
 
 ```powershell
-$env:SCENARIO="depeg"
-npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO
+Set-Location stableguard-cre\depeg-monitor
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+Set-Location ..\..
 ```
 
-Registry transitions NORMAL → WATCH.
+The workflow reads TestPriceFeed ($0.94), classifies USDC as CRITICAL (signalLevel=3,
+compositeScore=3), ABI-encodes the report, and writes it on-chain via the MockKeystoneForwarder.
+The receiver calls `eventRegistry.processReport` → state: **NORMAL → WATCH**.
 
-**Step 3 — Second CRITICAL report (CONFIRMED_DEPEG + vault freeze)**
+---
+
+### Step 3 — CRE simulate cycle 2: WATCH → CONFIRMED\_DEPEG + vault freeze
 
 ```powershell
-$env:SCENARIO="depeg"
-npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO
+Set-Location stableguard-cre\depeg-monitor
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+Set-Location ..\..
 ```
 
-confirmedThreshold=2 → `initiateProtection` fires: hold acquired, vault paused. If CustomerOverrideModule is wired, the hold slot is registered automatically.
+confirmedThreshold=2 → `initiateProtection` fires: hold acquired, `vault.pause()` called.
+On Arbiscan, `vault.paused()` = true. CustomerOverrideModule receives `registerHold` automatically.
 
-**Step 4 — Customer Safe places hold (blocks auto-recovery)**
+---
+
+### Step 4 — Customer Safe places hold (blocks auto-recovery)
 
 ```powershell
 npx hardhat run scripts/demo-place-hold.js --network arbitrumSepolia
 ```
 
-Any MockSafe owner activates the hold. Auto-recovery is blocked while hold is active.
+MockSafe owner activates the override hold. Auto-recovery is blocked while the hold is active.
 
-**Step 5 — Customer Safe early unlock (immediate unfreeze)**
+---
+
+### Step 5 — Customer Safe early unlock (immediate vault unfreeze)
 
 ```powershell
 npx hardhat run scripts/demo-early-unlock.js --network arbitrumSepolia
 ```
 
-MockSafe routes the call: `hold released → vault.unpause() → suppression window started`.
+Call chain: deployer → `mockSafe.callEarlyUnlock(...)` → `module.earlyUnlock(...)` →
+`holdLedger.releaseByOverride(...)` → `receiver.executeEarlyUnlock(...)` → `vault.unpause()`.
 
-**Step 6 — Recovery (3 × STABLE reports)**
-
-```powershell
-$env:SCENARIO="stable"
-$env:COUNT="3"
-npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO, Env:COUNT
-```
-
-After stabilityWin=3 consecutive stable reports, `eventRegistry.finalizeRecovery(eventId)` is callable on the next cycle. Recovery cooldown is 1800 s; the vault is fully released after cooldown.
+On Arbiscan immediately after: `vault.paused()` = false. The destination slot is marked COMPLETE;
+the event is now PROTECTED and eligible for recovery tracking.
 
 ---
 
-## 6. What you need to do yourself
+### Step 6 — Reset price to peg
 
-### Wallet funding
+```powershell
+$env:RESET="1"
+npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
+Remove-Item Env:RESET
+```
 
-Arbitrum Sepolia ETH: get from the Arbitrum Sepolia faucet. Budget 15–20 transactions (5 deploys + wiring + demo).
+TestPriceFeed now returns $1.00 = 0 bps → STABLE.
+
+---
+
+### Step 7 — CRE simulate cycles 3 × STABLE → RECOVERY\_PENDING
+
+Run the simulate three times (the stabilityWindow=3 requires three consecutive stable reports):
+
+```powershell
+Set-Location stableguard-cre\depeg-monitor
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+Set-Location ..\..
+```
+
+After the third STABLE report, `eventRegistry` automatically transitions to **RECOVERY_PENDING**
+and starts the recovery cooldown (recoveryCooldown = 1800 s).
+
+---
+
+### Step 8 — Wait cooldown, then final cycle → NORMAL
+
+After 1800 s (30 min), run one more cycle. `finalizeRecovery` becomes callable and the
+receiver calls it, transitioning the event to **NORMAL**:
+
+```powershell
+Set-Location stableguard-cre\depeg-monitor
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+Set-Location ..\..
+```
+
+> **Demo tip**: the vault is already unpaused after Step 5 — that is the key on-screen
+> moment. The 30-minute cooldown happens offscreen. You can cut the recording after Step 5,
+> note "recovery completes automatically after a 30-minute cooldown," then show the
+> NORMAL state later or in a voiceover.
+
+---
+
+### BACKUP — if CRE simulate is unavailable on the day
+
+If `cre workflow simulate --broadcast` fails (auth issue, CRE API outage), replace
+Steps 2–3 and Steps 7–8 with `demo-send-report.js`. The report payload and receiver
+interaction are identical; the only difference is the transaction is sent directly
+through the MockKeystoneForwarder by the deployer EOA rather than by the CRE DON.
+
+```powershell
+# BACKUP Steps 2–3: two CRITICAL reports → freeze
+$env:SCENARIO="depeg"; $env:COUNT="2"
+npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
+Remove-Item Env:SCENARIO, Env:COUNT
+
+# BACKUP Steps 7–8: three STABLE reports → recovery
+$env:SCENARIO="stable"; $env:COUNT="3"
+npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
+Remove-Item Env:SCENARIO, Env:COUNT
+# Then wait recoveryCooldown (1800 s) and run once more:
+$env:SCENARIO="stable"
+npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
+Remove-Item Env:SCENARIO
+```
+
+Steps 1, 4, 5, 6 are unchanged — demo-set-price.js and the override scripts do not use the CRE tool.
+
+---
+
+## 6. What you need to do yourself — ordered steps
+
+### Wallet funding (before any deploy)
+
+Arbitrum Sepolia ETH: get from the Arbitrum Sepolia faucet. Budget 20–25 transactions (5 deploys + wiring + demo).
 
 Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepolia. Address: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`.
 
@@ -321,17 +419,76 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
 | `ARBISCAN_API_KEY` | Contract verification after deploy |
 | `USE_DEMO_FORWARDER` | Set to `1` to use MockKeystoneForwarder (demo only) |
 
+### Ordered step list
+
+```
+ 1. Fund deployer wallet with Arbitrum Sepolia ETH and USDC
+ 2. Set ARB_SEPOLIA_RPC_URL, CRE_ETH_PRIVATE_KEY, ARBISCAN_API_KEY in .env
+
+ 3. Deploy core contracts (demo mode):
+      $env:USE_DEMO_FORWARDER="1"
+      npx hardhat run scripts/deploy-arbitrum-sepolia.js --network arbitrumSepolia
+      Remove-Item Env:USE_DEMO_FORWARDER
+
+ 4. Register USDC exposure (needs ExposureRegistry admin):
+      npx hardhat run scripts/register-exposure.js --network arbitrumSepolia
+
+ 5. Deploy demo contracts:
+      npx hardhat run scripts/deploy-demo-contracts-arbitrum.js --network arbitrumSepolia
+
+ 6. Fill in stableguard-cre/depeg-monitor/config.arbitrum-demo.json:
+      consumerAddress  → StableGuardCREReceiver address from deployments/arbitrum-sepolia.json
+      demoFeedAddress  → TestPriceFeed address from deployments/arbitrum-sepolia-demo.json
+
+ 7. Wire CustomerOverrideModule (needs GOVERNANCE_ROLE on vault):
+      npx hardhat run scripts/demo-wire-all.js --network arbitrumSepolia
+
+ 8. Verify all 5 contracts on Arbiscan (see Section 2f)
+
+ 9. Role revocation check — LAST wiring step:
+      npx hardhat run scripts/remediate-role-revocation.js --network arbitrumSepolia
+      Expected: all three operational roles already revoked ✓
+
+10. Deposit small USDC into the vault (use Arbiscan write tab or a one-off script)
+
+11. Pre-recording checks:
+      receiver.forwarder() == 0xd41263567ddfead91504199b8c6c87371e83ca5d  ✓
+      vault.paused()       == false                                         ✓
+      vault.asset()        == 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d   ✓
+      module.overrideAuthority(vault) == MockSafe address                   ✓
+
+12. cre login
+
+13. Dry-run to confirm workflow compiles and produces CRITICAL signal:
+      Set-Location stableguard-cre\depeg-monitor
+      cre workflow simulate . --target=arbitrum-staging-settings
+      Set-Location ..\..
+
+--- RECORDING STARTS ---
+
+14. demo-set-price.js → $0.94 (CRITICAL)
+15. cre workflow simulate --broadcast × 1  →  WATCH
+16. cre workflow simulate --broadcast × 1  →  CONFIRMED_DEPEG + vault freeze
+17. demo-place-hold.js                      →  override hold active
+18. demo-early-unlock.js                    →  vault.paused() = false (KEY MOMENT)
+19. demo-set-price.js → $1.00 (STABLE)
+20. cre workflow simulate --broadcast × 3  →  RECOVERY_PENDING (after 3rd stable cycle)
+21. Wait 1800 s, then:
+    cre workflow simulate --broadcast × 1  →  NORMAL
+```
+
 ### Pre-demo checklist
 
-- [ ] New deployer wallet funded with Arbitrum Sepolia ETH
-- [ ] All 5 contracts deployed — addresses recorded in `deployments/arbitrum-sepolia.json`
+- [ ] Deployer wallet funded with Arbitrum Sepolia ETH
+- [ ] All 5 core contracts deployed — addresses in `deployments/arbitrum-sepolia.json`
 - [ ] All contracts verified on Arbiscan
-- [ ] `remediate-role-revocation.js` reports no residual roles on deployer
 - [ ] USDC exposure registered (`register-exposure.js`)
-- [ ] Demo contracts deployed (`deploy-demo-contracts-arbitrum.js`) — addresses in `deployments/arbitrum-sepolia-demo.json`
-- [ ] `config.arbitrum-demo.json` updated with new receiver address and TestPriceFeed address
-- [ ] `demo-wire-all.js` completed successfully (CustomerOverrideModule wired)
-- [ ] `receiver.forwarder()` on Arbiscan matches `0xd41263567ddfead91504199b8c6c87371e83ca5d`
+- [ ] Demo contracts deployed — addresses in `deployments/arbitrum-sepolia-demo.json`
+- [ ] `config.arbitrum-demo.json` `consumerAddress` and `demoFeedAddress` filled in
+- [ ] `demo-wire-all.js` completed successfully
+- [ ] `remediate-role-revocation.js` reports all three roles revoked ✓
 - [ ] Small USDC deposit visible in vault on Arbiscan
+- [ ] `receiver.forwarder()` on Arbiscan = `0xd41263567ddfead91504199b8c6c87371e83ca5d`
 - [ ] `vault.paused()` = false before recording begins
-- [ ] `cre login` completed (for simulate; not needed for demo scripts)
+- [ ] `cre login` completed
+- [ ] Dry-run simulate (stub mode) confirmed CRITICAL signal for USDC
