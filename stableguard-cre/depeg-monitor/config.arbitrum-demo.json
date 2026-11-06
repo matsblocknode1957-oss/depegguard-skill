@@ -1,0 +1,20 @@
+{
+  "_comment": "Demo config: USDC reads from TestPriceFeed (call setPrice(94000000) for $0.94 depeg). Set consumerAddress and demoFeedAddress after deploy-demo-contracts-arbitrum.js.",
+  "schedule": "*/30 * * * * *",
+  "chainSelectorName": "ethereum-testnet-sepolia-arbitrum-1",
+  "consumerAddress": "REPLACE_WITH_NEW_RECEIVER_ADDRESS",
+  "chainSelector": "3478487238524512106",
+  "coins": [
+    {
+      "symbol": "USDC",
+      "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "priceFeedAddress": "REPLACE_WITH_CHAINLINK_USDC_USD_FEED_ARB_SEPOLIA",
+      "demoFeedAddress":  "REPLACE_WITH_TESTPRICEFEED_ADDRESS"
+    },
+    {
+      "symbol": "USDT",
+      "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      "priceFeedAddress": "REPLACE_WITH_CHAINLINK_USDT_USD_FEED_ARB_SEPOLIA"
+    }
+  ]
+}

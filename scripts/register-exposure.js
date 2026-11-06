@@ -4,37 +4,24 @@
  * register-exposure.js
  *
  * Registers USDC exposure for the StableGuard vault in ExposureRegistry.
- *
- * Symbol encoding: the receiver uses `bytes32(uint256(uint160(coin)))` where
- * `coin` is the address from the workflow config. The workflow uses MAINNET
- * coin addresses as chain-agnostic identifiers, so the symbol registered here
- * must be derived from the mainnet USDC address regardless of which testnet
- * the vault is deployed on.
+ * Reads addresses from deployments/<network>.json (written by deploy-arbitrum-sepolia.js).
  *
  * Usage:
- *   npx hardhat run scripts/register-exposure.js --network sepolia
  *   npx hardhat run scripts/register-exposure.js --network arbitrumSepolia
+ *   npx hardhat run scripts/register-exposure.js --network sepolia
  */
 
-const hre = require("hardhat");
+const hre  = require("hardhat");
+const fs   = require("fs");
+const path = require("path");
 
-// Mainnet USDC — used as coin identifier in the workflow (chain-agnostic key)
+// Mainnet USDC — used as coin identifier in the workflow (chain-agnostic key).
+// The receiver encodes coin addresses as bytes32(uint256(uint160(addr))).
 const USDC_MAINNET = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-// Deployments keyed by Hardhat network name.
-// expectedAsset: the USDC token address on that testnet (from deployments/*.json params.asset).
-// This is the address vault.asset() must return — if it doesn't, something was deployed wrong.
-const DEPLOYMENTS = {
-  sepolia: {
-    exposureRegistry: "0xC60Ceb4faB3B63495534B2a9A5EB3F6C3f668789",
-    vault:            "0xAa940C87f3D3251fD297894b5cef7dC7e71b3665",
-    expectedAsset:    "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-  },
-  arbitrumSepolia: {
-    exposureRegistry: "0x55fc74c807dd5aC468Cf2e9B5c26Abb9b1149945",
-    vault:            "0x86602cDeC52Df65Bc8D66528De429EB11A9E0497",
-    expectedAsset:    "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-  },
+const NETWORK_FILE_MAP = {
+  arbitrumSepolia: "arbitrum-sepolia",
+  sepolia:         "sepolia",
 };
 
 const EXPOSURE_REGISTRY_ABI = [
@@ -48,88 +35,95 @@ const VAULT_ABI = [
 ];
 
 async function main() {
-  const network = hre.network.name;
-  const addrs   = DEPLOYMENTS[network];
-
-  if (!addrs) {
+  const network   = hre.network.name;
+  const fileKey   = NETWORK_FILE_MAP[network];
+  if (!fileKey) {
     throw new Error(
-      `No deployment addresses for network "${network}". ` +
-      `Supported: ${Object.keys(DEPLOYMENTS).join(", ")}`
+      `Unsupported network "${network}". Supported: ${Object.keys(NETWORK_FILE_MAP).join(", ")}`
     );
   }
+
+  const deploymentFile = path.join(__dirname, `../deployments/${fileKey}.json`);
+  if (!fs.existsSync(deploymentFile)) {
+    throw new Error(
+      `No deployment file at ${deploymentFile}.\n` +
+      "Run the deploy script first."
+    );
+  }
+
+  const deployment = JSON.parse(fs.readFileSync(deploymentFile, "utf8"));
+  const exposureRegistryAddr = deployment.contracts.ExposureRegistry;
+  const vaultAddr            = deployment.contracts.StableGuardVault;
+  const expectedAsset        = deployment.params.asset;
+  const recordedDeployer     = deployment.deployer;
 
   const [caller] = await hre.ethers.getSigners();
-  console.log("Network:          ", network);
-  console.log("Caller:           ", caller.address);
+  console.log("Network:  ", network);
+  console.log("Caller:   ", caller.address);
 
-  const DEPLOYER = "0xcBB1AD132bB51Cc41210309d6e3bd45598eebb5e";
-  if (caller.address.toLowerCase() !== DEPLOYER.toLowerCase()) {
+  if (caller.address.toLowerCase() !== recordedDeployer.toLowerCase()) {
     throw new Error(
-      `Wrong wallet: got ${caller.address}, expected deployer ${DEPLOYER}.\n` +
-      "Set CRE_ETH_PRIVATE_KEY in stableguard-cre/.env to the deployer private key."
+      `Signer mismatch.\n` +
+      `  Expected deployer: ${recordedDeployer}\n` +
+      `  Got:               ${caller.address}\n` +
+      "Set CRE_ETH_PRIVATE_KEY to the original deployer key."
     );
   }
 
-  // ── 1. Confirm vault.asset() matches the expected testnet USDC ────────────
-  const vault = new hre.ethers.Contract(addrs.vault, VAULT_ABI, caller);
+  // ── 1. Confirm vault.asset() matches ──────────────────────────────────────
+  const vault = new hre.ethers.Contract(vaultAddr, VAULT_ABI, caller);
   const onChainAsset = await vault.asset();
   console.log("\nvault.asset():   ", onChainAsset);
-  console.log("Expected asset:  ", addrs.expectedAsset);
+  console.log("Expected asset:  ", expectedAsset);
 
-  if (onChainAsset.toLowerCase() !== addrs.expectedAsset.toLowerCase()) {
+  if (onChainAsset.toLowerCase() !== expectedAsset.toLowerCase()) {
     throw new Error(
-      `vault.asset() mismatch on ${network}.\n` +
-      `  got:      ${onChainAsset}\n` +
-      `  expected: ${addrs.expectedAsset}\n` +
-      "The vault may be pointing at a different token. Aborting — do not register exposure."
+      `vault.asset() mismatch. Got ${onChainAsset}, expected ${expectedAsset}.\n` +
+      "The vault may be pointing at the wrong token."
     );
   }
 
   console.log(
-    "NOTE: The workflow uses MAINNET USDC address as the coin identifier.\n" +
-    "      vault.asset() is the deployed-chain asset (different address, same token).\n" +
-    "      Registration must use the MAINNET address so the receiver can match it."
+    "NOTE: Registration uses MAINNET USDC as the coin identifier.\n" +
+    "      The workflow uses mainnet addresses as chain-agnostic keys."
   );
 
-  // ── 2. Compute symbol ─────────────────────────────────────────────────────
-  // bytes32(uint256(uint160(mainnetUsdcAddress))) — left-pad to 32 bytes
+  // ── 2. Compute symbol ──────────────────────────────────────────────────────
   const sym = hre.ethers.zeroPadValue(hre.ethers.getAddress(USDC_MAINNET), 32);
   console.log("\nMainnet USDC:    ", USDC_MAINNET);
   console.log("Symbol (bytes32):", sym);
 
-  // ── 3. Check current state ────────────────────────────────────────────────
-  const reg = new hre.ethers.Contract(addrs.exposureRegistry, EXPOSURE_REGISTRY_ABI, caller);
+  // ── 3. Check current state ─────────────────────────────────────────────────
+  const reg   = new hre.ethers.Contract(exposureRegistryAddr, EXPOSURE_REGISTRY_ABI, caller);
   const admin = await reg.admin();
   console.log("\nExposureRegistry admin:", admin);
 
   if (admin.toLowerCase() !== caller.address.toLowerCase()) {
     throw new Error(
-      `Caller ${caller.address} is not the admin (${admin}). ` +
-      "Use the deployer wallet (CRE_ETH_PRIVATE_KEY in stableguard-cre/.env)."
+      `Caller ${caller.address} is not the ExposureRegistry admin (${admin}).`
     );
   }
 
-  const alreadyRegistered = await reg.isExposed(addrs.vault, sym);
+  const alreadyRegistered = await reg.isExposed(vaultAddr, sym);
   if (alreadyRegistered) {
     console.log("\n✓ Exposure already registered — nothing to do.");
     return;
   }
 
-  // ── 4. Register ───────────────────────────────────────────────────────────
+  // ── 4. Register ────────────────────────────────────────────────────────────
   console.log("\nRegistering exposure...");
-  const tx = await reg.registerExposure(addrs.vault, sym);
+  const tx = await reg.registerExposure(vaultAddr, sym);
   console.log("  tx:", tx.hash);
   await tx.wait();
 
-  // ── 5. Verify ─────────────────────────────────────────────────────────────
-  const confirmed = await reg.isExposed(addrs.vault, sym);
+  const confirmed = await reg.isExposed(vaultAddr, sym);
   if (!confirmed) {
-    throw new Error("Registration tx succeeded but isExposed() still returns false — check logs.");
+    throw new Error("tx succeeded but isExposed() still returns false — check logs.");
   }
 
   console.log(`\n✓ Exposure registered.`);
   console.log(`  network:   ${network}`);
-  console.log(`  vault:     ${addrs.vault}`);
+  console.log(`  vault:     ${vaultAddr}`);
   console.log(`  symbol:    ${sym}  (mainnet USDC ${USDC_MAINNET})`);
   console.log(`  tx:        ${tx.hash}`);
 }

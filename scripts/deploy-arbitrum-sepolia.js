@@ -39,6 +39,16 @@ async function main() {
         throw new Error("Deployer wallet has no ETH — fund it with Arbitrum Sepolia ETH before deploying.");
     }
 
+    // Demo forwarder override — set USE_DEMO_FORWARDER=1 in .env for the demo receiver.
+    // WARNING: MockKeystoneForwarder does NOT verify signatures. Testnet only.
+    const MOCK_KEYSTONE_FORWARDER_DEMO = "0xd41263567ddfead91504199b8c6c87371e83ca5d";
+    const useDemoForwarder = process.env.USE_DEMO_FORWARDER === "1";
+    const forwarderAddress = useDemoForwarder ? MOCK_KEYSTONE_FORWARDER_DEMO : KEYSTONE_FORWARDER;
+    if (useDemoForwarder) {
+        console.log("⚠️  DEMO MODE: using MockKeystoneForwarder (no signature verification)");
+        console.log("   Forwarder:", forwarderAddress, "\n");
+    }
+
     // ── 1. ExposureRegistry ──────────────────────────────────────────────────
     console.log("1/5  Deploying ExposureRegistry...");
     const ExposureRegistry = await hre.ethers.getContractFactory("ExposureRegistry");
@@ -89,7 +99,7 @@ async function main() {
     console.log("5/5  Deploying StableGuardCREReceiver...");
     const StableGuardCREReceiver = await hre.ethers.getContractFactory("StableGuardCREReceiver");
     const receiver = await StableGuardCREReceiver.deploy(
-        KEYSTONE_FORWARDER,
+        forwarderAddress,
         exposureAddr,
         eventAddr,
         vaultAddr,
@@ -146,7 +156,7 @@ async function main() {
         },
         params: {
             asset:             ARB_SEPOLIA_USDC,
-            keystoneForwarder: KEYSTONE_FORWARDER,
+            keystoneForwarder: forwarderAddress,
             chainSelector:     ARB_SEPOLIA_CHAIN_SELECTOR.toString(),
             vaultName:         VAULT_NAME,
             vaultSymbol:       VAULT_SYMBOL,
