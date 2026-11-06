@@ -3,16 +3,17 @@
 /**
  * deploy-demo-contracts-arbitrum.js
  *
- * Deploys the four optional demo contracts on Arbitrum Sepolia:
+ * Deploys the five optional demo contracts on Arbitrum Sepolia:
  *   1. MockMorphoVaultV2        — settable synthetic Morpho vault for the demo
  *   2. MorphoSentinelAdapter    — calls onDepeg() / onRecovery() on the mock vault
  *   3. CustomerOverrideModule   — customer Safe opt-in hold / earlyUnlock
  *   4. TestPriceFeed            — CRE workflow reads this instead of a real Chainlink feed
+ *   5. MockSafe                 — single-owner Safe stand-in; deployer is the initial owner
  *
  * Pre-requisite: run scripts/deploy-arbitrum-sepolia.js first; this script reads
  * deployments/arbitrum-sepolia.json for the core contract addresses.
  *
- * Usage:
+ * Usage (PowerShell):
  *   npx hardhat run scripts/deploy-demo-contracts-arbitrum.js --network arbitrumSepolia
  */
 
@@ -86,12 +87,24 @@ async function main() {
     console.log("     ✓", overrideModuleAddr);
 
     // ── 4. TestPriceFeed ──────────────────────────────────────────────────────
-    console.log("4/4  Deploying TestPriceFeed (initial $1.00)...");
+    console.log("4/5  Deploying TestPriceFeed (initial $1.00)...");
     const TestPriceFeed = await hre.ethers.getContractFactory("TestPriceFeed");
     const priceFeed = await TestPriceFeed.deploy(INITIAL_PRICE);
     await priceFeed.waitForDeployment();
     const priceFeedAddr = await priceFeed.getAddress();
     console.log("     ✓", priceFeedAddr);
+
+    // ── 5. MockSafe ───────────────────────────────────────────────────────────
+    // Single-owner Safe stand-in. Deployer is the initial (and only) owner.
+    // Used as overrideAuthority by CustomerOverrideModule.
+    // earlyUnlock and cancelHold are routed through this contract so that
+    // msg.sender == MockSafe address == overrideAuthority[vault].
+    console.log("5/5  Deploying MockSafe (owner: deployer)...");
+    const MockSafe = await hre.ethers.getContractFactory("MockSafe");
+    const mockSafe = await MockSafe.deploy(deployer.address);
+    await mockSafe.waitForDeployment();
+    const mockSafeAddr = await mockSafe.getAddress();
+    console.log("     ✓", mockSafeAddr);
 
     // ── Summary ───────────────────────────────────────────────────────────────
     console.log("\n── Demo contracts deployed ─────────────────────────────────────────");
@@ -99,14 +112,16 @@ async function main() {
     console.log("  MorphoSentinelAdapter:   ", adapterAddr);
     console.log("  CustomerOverrideModule:  ", overrideModuleAddr);
     console.log("  TestPriceFeed ($1.00):   ", priceFeedAddr);
+    console.log("  MockSafe (owner: deployer):", mockSafeAddr);
 
     console.log("\n── Next steps ──────────────────────────────────────────────────────");
-    console.log("  1. Wire MorphoSentinelAdapter (see DEPLOY_RUNBOOK_ARB_SEPOLIA.md §2)");
-    console.log("  2. Wire CustomerOverrideModule (see DEPLOY_RUNBOOK_ARB_SEPOLIA.md §2)");
-    console.log("  3. Set config.arbitrum-demo.json consumerAddress to new receiver");
-    console.log("     and demoFeedAddress (USDC) to:", priceFeedAddr);
-    console.log("  4. To stage depeg: cast send", priceFeedAddr,
-                '"setPrice(int256)" 94000000 --rpc-url ...');
+    console.log("  1. Update config.arbitrum-demo.json:");
+    console.log("     - consumerAddress  → new receiver address");
+    console.log("     - demoFeedAddress  → TestPriceFeed:", priceFeedAddr);
+    console.log("  2. Wire CustomerOverrideModule:");
+    console.log("     npx hardhat run scripts/demo-wire-all.js --network arbitrumSepolia");
+    console.log("  3. Stage depeg price (PowerShell):');");
+    console.log("     $env:PRICE='94000000'; npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia");
 
     const demo = {
         network:     "arbitrumSepolia",
@@ -117,11 +132,12 @@ async function main() {
             MorphoSentinelAdapter:  adapterAddr,
             CustomerOverrideModule: overrideModuleAddr,
             TestPriceFeed:          priceFeedAddr,
+            MockSafe:               mockSafeAddr,
         },
         params: {
-            maxHoldDuration:  MAX_HOLD_DURATION,
+            maxHoldDuration:   MAX_HOLD_DURATION,
             suppressionWindow: SUPPRESSION_WINDOW,
-            initialPrice:     INITIAL_PRICE.toString(),
+            initialPrice:      INITIAL_PRICE.toString(),
         },
     };
 
