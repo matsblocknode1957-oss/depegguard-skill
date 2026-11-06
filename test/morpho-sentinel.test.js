@@ -380,6 +380,34 @@ describe("MorphoSentinelAdapter", function () {
             adapter.connect(nonOwner).setCriticalThreshold(2)
         ).to.be.revertedWithCustomError(adapter, "Unauthorized");
     });
+
+    // ── T-24: H-03 — caps already 0 → market counted, no decrease calls ─────
+
+    it("T-24 (H-03): caps already 0 → market counted without calling decreaseAbsoluteCap/decreaseRelativeCap", async function () {
+        // Set both caps to 0 (pre-protected state)
+        await morphoVault.connect(owner).setCap(marketData, 0, 0);
+        // If the code tried to call decreaseAbsoluteCap/decreaseRelativeCap it would revert
+        await morphoVault.connect(owner).setCapDecreaseReverts(marketData, true);
+
+        await adapter.connect(owner).setReceiver(receiverSigner.address);
+        await adapter.connect(owner).registerMarkets(coinAddr, [marketEntry]);
+
+        const tx = await adapter.connect(receiverSigner).onDepeg(coinAddr, 3);
+        const receipt = await tx.wait();
+
+        // marketsCapped must be 1 — the market is considered already protected
+        const zeroedEvents = findEvent(receipt, adapter.interface, "MorphoCapsZeroed");
+        expect(zeroedEvents.length).to.equal(1);
+        expect(zeroedEvents[0].args.marketsCapped).to.equal(1n,
+            "market with pre-zeroed caps must count as capped");
+
+        // No cap-decrease failure events (the calls were skipped, not attempted)
+        const failEvents = findEvent(receipt, adapter.interface, "MorphoCapDecreaseFailed");
+        expect(failEvents.length).to.equal(0, "no MorphoCapDecreaseFailed when caps are already 0");
+
+        // deallocate still called (allocation > 0 from beforeEach)
+        expect(await morphoVault.getDeallocCallCount()).to.equal(1n);
+    });
 });
 
 // ─── Receiver + MorphoSentinelAdapter integration tests ──────────────────────

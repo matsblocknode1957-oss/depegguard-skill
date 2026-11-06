@@ -5,6 +5,8 @@ interface IMorphoVaultV2 {
     function owner() external view returns (address);
     function isSentinel(address) external view returns (bool);
     function allocation(bytes32 id) external view returns (uint256);
+    function absoluteCap(bytes32 id) external view returns (uint256);
+    function relativeCap(bytes32 id) external view returns (uint256);
     function decreaseAbsoluteCap(bytes memory idData, uint256 newCap) external;
     function decreaseRelativeCap(bytes memory idData, uint256 newCap) external;
     function deallocate(address adapter, bytes memory data, uint256 assets) external;
@@ -178,16 +180,28 @@ contract MorphoSentinelAdapter {
             bytes32 mId        = keccak256(mData);
             bool capSuccess    = false;
 
-            try morphoVault.decreaseAbsoluteCap(mData, 0) {
+            // H-03: read current cap first; skip the call if already 0 (already protected)
+            // This avoids a potential revert on vaults that require a strict decrease (< vs <=).
+            uint256 absCap = morphoVault.absoluteCap(mId);
+            if (absCap == 0) {
                 capSuccess = true;
-            } catch (bytes memory reason) {
-                emit MorphoCapDecreaseFailed(coin, mId, reason);
+            } else {
+                try morphoVault.decreaseAbsoluteCap(mData, 0) {
+                    capSuccess = true;
+                } catch (bytes memory reason) {
+                    emit MorphoCapDecreaseFailed(coin, mId, reason);
+                }
             }
 
-            try morphoVault.decreaseRelativeCap(mData, 0) {
+            uint256 relCap = morphoVault.relativeCap(mId);
+            if (relCap == 0) {
                 capSuccess = true;
-            } catch (bytes memory reason) {
-                emit MorphoCapDecreaseFailed(coin, mId, reason);
+            } else {
+                try morphoVault.decreaseRelativeCap(mData, 0) {
+                    capSuccess = true;
+                } catch (bytes memory reason) {
+                    emit MorphoCapDecreaseFailed(coin, mId, reason);
+                }
             }
 
             uint256 alloc = morphoVault.allocation(mId);

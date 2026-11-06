@@ -96,6 +96,12 @@ contract CustomerOverrideModule {
     );
     event HoldCancelled(address indexed coin, address indexed vault);
     event HoldRenewed(address indexed coin, address indexed vault, uint256 newHoldUntil);
+    event StaleHoldOverwritten(
+        address indexed coin,
+        address indexed vault,
+        bytes32 indexed oldLedgerHoldId,
+        bytes32         newLedgerHoldId
+    );
     event MaxHoldDurationSet(uint256 newDuration);
     event SuppressionWindowSet(uint256 newWindow);
     event AdminTransferred(address indexed oldAdmin, address indexed newAdmin);
@@ -179,6 +185,18 @@ contract CustomerOverrideModule {
 
         // No authority configured → override feature not enabled for this vault
         if (overrideAuthority[vault] == address(0)) return;
+
+        // M-03: if a previous slot exists, release its ledger hold so it doesn't
+        // remain live alongside the new one.  The new hold already keeps the vault
+        // frozen, so releasing the old hold has no adverse effect.  Wrapped in
+        // try/catch because the hold may have been released during a prior recovery
+        // cycle (HoldAlreadyReleased) or may have been recorded with a placeholder id.
+        OverrideHold storage existing = overrideHolds[coin][vault];
+        if (existing.registered) {
+            bytes32 oldId = existing.ledgerHoldId;
+            try holdLedger.releaseByOverride(oldId) { } catch { }
+            emit StaleHoldOverwritten(coin, vault, oldId, ledgerHoldId);
+        }
 
         overrideHolds[coin][vault] = OverrideHold({
             ledgerHoldId:   ledgerHoldId,

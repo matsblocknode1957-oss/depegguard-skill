@@ -697,5 +697,128 @@ describe("CustomerOverrideModule — 25 edge cases", function () {
 
 });
 
+// ─── M-03: registerHold stale overwrite ──────────────────────────────────────
+// Fresh setup: coordinator EOA is the ledger coordinator (not the receiver),
+// so we can call acquire() directly to seed the ledger with known holdIds.
+
+describe("M-03 — registerHold overwrite releases stale ledger hold", function () {
+
+    let governance, coordinator, safeOwner, coin;
+    let asset, vault, holdLedger, overrideModule, safeContract;
+
+    const MAX_HOLD_DURATION = 7200n;
+    const SUPPRESSION_WINDOW = 3600n;
+
+    function findEvent(receipt, iface, name) {
+        return receipt.logs
+            .map(l => { try { return iface.parseLog(l); } catch { return null; } })
+            .filter(e => e && e.name === name);
+    }
+
+    async function acquireHold(ledger, signer, vaultAddr, rootId, assetId, mode) {
+        const tx = await ledger.connect(signer).acquire(vaultAddr, rootId, assetId, mode);
+        const receipt = await tx.wait();
+        const ev = findEvent(receipt, ledger.interface, "HoldAcquired")[0];
+        return ev.args.holdId;
+    }
+
+    beforeEach(async function () {
+        [governance, coordinator, safeOwner, , coin] = await ethers.getSigners();
+
+        const MockERC20Factory = await ethers.getContractFactory("MockERC20");
+        asset = await MockERC20Factory.deploy("Test USD", "TUSD", 6);
+
+        const VaultFactory = await ethers.getContractFactory("StableGuardVault");
+        vault = await VaultFactory.deploy(
+            await asset.getAddress(), "StableGuard Vault", "sgTUSD",
+            governance.address
+        );
+
+        // Fresh ledger where coordinator = coordinator EOA
+        const LedgerFactory = await ethers.getContractFactory("ProtectionHoldLedger");
+        holdLedger = await LedgerFactory.deploy(governance.address, coordinator.address);
+
+        const ModuleFactory = await ethers.getContractFactory("CustomerOverrideModule");
+        overrideModule = await ModuleFactory.deploy(
+            await holdLedger.getAddress(),
+            MAX_HOLD_DURATION,
+            SUPPRESSION_WINDOW,
+            governance.address
+        );
+
+        const MockSafeFactory = await ethers.getContractFactory("MockSafe");
+        safeContract = await MockSafeFactory.deploy(safeOwner.address);
+
+        // Approve overrideModule for this vault's override operations
+        await holdLedger.connect(governance).approveVaultModule(
+            await vault.getAddress(), await overrideModule.getAddress()
+        );
+
+        // Grant PAUSE_COORDINATOR_ROLE to coordinator so registerHold auth passes
+        const PC_ROLE = await vault.PAUSE_COORDINATOR_ROLE();
+        await vault.connect(governance).grantRole(PC_ROLE, coordinator.address);
+
+        // Set override authority on module (governance has GOVERNANCE_ROLE on vault)
+        await overrideModule.connect(governance).setVaultAuthority(
+            await vault.getAddress(), await safeContract.getAddress()
+        );
+    });
+
+    it("26 (M-03) — overwrite: releases old ledger hold; vault stays frozen by new hold; StaleHoldOverwritten emitted", async function () {
+        const vaultAddr = await vault.getAddress();
+        const coinAddr  = coin.address;
+        const assetId   = ethers.zeroPadValue(coinAddr, 32);
+        const root1     = ethers.keccak256(ethers.toUtf8Bytes("incident-1"));
+        const root2     = ethers.keccak256(ethers.toUtf8Bytes("incident-2"));
+        const FULL_FREEZE = 0;
+
+        // Acquire first ledger hold (simulates first depeg freeze)
+        const holdId1 = await acquireHold(holdLedger, coordinator, vaultAddr, root1, assetId, FULL_FREEZE);
+
+        // Register first hold in override module
+        await overrideModule.connect(coordinator).registerHold(
+            coinAddr, vaultAddr, root1, holdId1, 2
+        );
+
+        // Acquire second ledger hold (simulates second depeg freeze while still frozen)
+        const holdId2 = await acquireHold(holdLedger, coordinator, vaultAddr, root2, assetId, FULL_FREEZE);
+
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(2n,
+            "both holds active before overwrite");
+
+        // Second registerHold — must release hold1 and emit StaleHoldOverwritten
+        const tx = await overrideModule.connect(coordinator).registerHold(
+            coinAddr, vaultAddr, root2, holdId2, 3
+        );
+        const receipt = await tx.wait();
+
+        // StaleHoldOverwritten emitted with correct ids
+        const staleEvents = findEvent(receipt, overrideModule.interface, "StaleHoldOverwritten");
+        expect(staleEvents.length).to.equal(1);
+        expect(staleEvents[0].args.oldLedgerHoldId).to.equal(holdId1);
+        expect(staleEvents[0].args.newLedgerHoldId).to.equal(holdId2);
+
+        // HoldSlotRegistered still emitted for new hold
+        const slotEvents = findEvent(receipt, overrideModule.interface, "HoldSlotRegistered");
+        expect(slotEvents.length).to.equal(1);
+        expect(slotEvents[0].args.rootIncidentId).to.equal(root2);
+
+        // Old hold must be inactive in the ledger
+        const h1 = await holdLedger.getHold(holdId1);
+        expect(h1.active).to.equal(false, "old ledger hold must be released after overwrite");
+
+        // Vault still frozen — new hold keeps activeHoldCount at 1
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(1n,
+            "vault still frozen by new hold");
+
+        // Override module slot now tracks new hold
+        const slot = await overrideModule.overrideHolds(coinAddr, vaultAddr);
+        expect(slot.ledgerHoldId).to.equal(holdId2);
+        expect(slot.rootIncidentId).to.equal(root2);
+        expect(slot.registered).to.equal(true);
+    });
+
+});
+
 // chai `anyValue` helper
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
