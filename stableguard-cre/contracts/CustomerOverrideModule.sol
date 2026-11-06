@@ -34,9 +34,9 @@ interface IExecuteEarlyUnlock {
 ///           5. The full override Safe may call earlyUnlock (immediate unfreeze + suppression
 ///              window) or cancelHold (deactivate hold; vault unfreezes on next receiver cycle).
 ///
-///         Suppression window: after earlyUnlock, the same (rootIncidentId, vault) pair is
-///         suppressed for suppressionWindow seconds if the new composite score ≤ severityAtUnlock.
-///         A different rootIncidentId is never suppressed regardless.
+///         Suppression window: after earlyUnlock, the same (coin, vault) pair is suppressed
+///         for suppressionWindow seconds if the new composite score ≤ severityAtUnlock.
+///         A different coin on the same vault is never suppressed (H-04b).
 contract CustomerOverrideModule {
 
     bytes32 public constant GOVERNANCE_ROLE        = keccak256("GOVERNANCE_ROLE");
@@ -73,8 +73,8 @@ contract CustomerOverrideModule {
 
     // rootIncidentId → vault → suppression record
     mapping(bytes32 => mapping(address => Suppression)) private _suppressions;
-    // vault → vault-level suppression (H-04: set by earlyUnlock so fresh events are also suppressed)
-    mapping(address => Suppression) private _vaultSuppressions;
+    // coin → vault → coin-level suppression (H-04b: keyed by coin so a different coin on the same vault is never suppressed)
+    mapping(address => mapping(address => Suppression)) private _coinVaultSuppressions;
 
     // ── Events ────────────────────────────────────────────────────────────────
 
@@ -246,13 +246,13 @@ contract CustomerOverrideModule {
 
     // ── isSuppressed ──────────────────────────────────────────────────────────
 
-    function isSuppressed(bytes32 rootIncidentId, address vault, uint8 score)
+    function isSuppressed(bytes32 rootIncidentId, address coin, address vault, uint8 score)
         external view returns (bool)
     {
         Suppression storage s1 = _suppressions[rootIncidentId][vault];
         if (block.timestamp < s1.suppressUntil && score <= s1.severityAtUnlock) return true;
-        // H-04: also check vault-level suppression so fresh events (new rootIncidentId) are caught
-        Suppression storage s2 = _vaultSuppressions[vault];
+        // H-04b: coin-scoped suppression — only suppresses the earlyUnlocked coin, not others on the vault
+        Suppression storage s2 = _coinVaultSuppressions[coin][vault];
         return block.timestamp < s2.suppressUntil && score <= s2.severityAtUnlock;
     }
 
@@ -291,13 +291,13 @@ contract CustomerOverrideModule {
         if (recv == address(0)) revert ReceiverNotSet(vault);
         IExecuteEarlyUnlock(recv).executeEarlyUnlock(coin, vault);
 
-        // Record suppression — both per-incident and vault-level (H-04).
+        // Record suppression — both per-incident and coin-scoped (H-04b).
         // Per-incident covers resumeProtectionTracking (same rootIncidentId reused).
-        // Vault-level covers fresh events after earlyUnlock (new rootIncidentId).
+        // Coin-scoped covers fresh events after earlyUnlock (new rootIncidentId, same coin).
         uint256 suppressUntil = block.timestamp + suppressionWindow;
         Suppression memory sup = Suppression({ suppressUntil: suppressUntil, severityAtUnlock: severity });
-        _suppressions[rootIncidentId][vault] = sup;
-        _vaultSuppressions[vault]            = sup;
+        _suppressions[rootIncidentId][vault]  = sup;
+        _coinVaultSuppressions[coin][vault]   = sup;
         emit HoldEarlyUnlocked(coin, vault, rootIncidentId, suppressUntil);
     }
 

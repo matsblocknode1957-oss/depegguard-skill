@@ -391,14 +391,14 @@ describe("CustomerOverrideModule — 25 edge cases", function () {
             coinAddr, vaultAddr, rootId
         );
 
-        // isSuppressed: same rootId, same vault, score <= severityAtHold → true
-        expect(await overrideModule.isSuppressed(rootId, vaultAddr, score)).to.equal(true);
-        expect(await overrideModule.isSuppressed(rootId, vaultAddr, score + 1n)).to.equal(false,
+        // isSuppressed: same rootId, same coin, same vault, score <= severityAtHold → true
+        expect(await overrideModule.isSuppressed(rootId, coinAddr, vaultAddr, score)).to.equal(true);
+        expect(await overrideModule.isSuppressed(rootId, coinAddr, vaultAddr, score + 1n)).to.equal(false,
             "higher severity score must not be suppressed");
 
         // Advance past suppression window
         await time.increase(Number(SUPPRESSION_WINDOW) + 1);
-        expect(await overrideModule.isSuppressed(rootId, vaultAddr, score)).to.equal(false,
+        expect(await overrideModule.isSuppressed(rootId, coinAddr, vaultAddr, score)).to.equal(false,
             "suppression must expire after suppressionWindow");
     });
 
@@ -909,6 +909,68 @@ describe("CustomerOverrideModule — 25 edge cases", function () {
         ).to.emit(holdLedger, "VaultModuleApproved").withArgs(vaultAddr, await newModule.getAddress());
 
         expect(await holdLedger.vaultApprovedModule(vaultAddr)).to.equal(await newModule.getAddress());
+    });
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // H-04b tests — per-coin suppression scoping
+    // ════════════════════════════════════════════════════════════════════════════
+
+    // ── Test 35 ───────────────────────────────────────────────────────────────
+    it("35 (H-04b-a) — coin A earlyUnlock then coin B CONFIRMED_DEPEG at same severity: vault FREEZES", async function () {
+        const allSigners = await ethers.getSigners();
+        const coin2 = allSigners[7]; // eighth signer used as a second stablecoin address
+        const vaultAddr = await vault.getAddress();
+
+        // Register coin2 exposure on the vault
+        await registry.connect(admin).registerExposure(vaultAddr, addrToBytes32(coin2.address));
+
+        // Freeze via coin A and place override hold
+        await earlyUnlockAndAdvanceToNormal();
+
+        // Coin A suppression window is now active.
+        // Coin B triggers CONFIRMED_DEPEG at the same severity (score=2).
+        // The suppression is coin-scoped — coin B must NOT be suppressed → vault freezes.
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin2.address], [CONFIRMED_THRESHOLD], CONFIRMED_THRESHOLD));
+
+        expect(await vault.paused()).to.equal(true,
+            "vault MUST freeze for coin B — coin A suppression must not bleed into coin B");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(1n);
+    });
+
+    // ── Test 36 ───────────────────────────────────────────────────────────────
+    it("36 (H-04b-b) — coin A earlyUnlock then coin A again at same severity during window: still suppressed", async function () {
+        const vaultAddr = await vault.getAddress();
+
+        await earlyUnlockAndAdvanceToNormal();
+
+        // Coin A re-depeg at the same severity — must be suppressed (ProtectionSuppressed emitted, no freeze)
+        const tx = await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin.address], [CONFIRMED_THRESHOLD], CONFIRMED_THRESHOLD));
+        const receipt = await tx.wait();
+
+        const suppressed = findEvent(receipt, receiver.interface, "ProtectionSuppressed");
+        expect(suppressed.length).to.equal(1, "ProtectionSuppressed must be emitted for coin A re-depeg");
+
+        expect(await vault.paused()).to.equal(false,
+            "vault must NOT freeze — coin A is still within its suppression window");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(0n);
+    });
+
+    // ── Test 37 ───────────────────────────────────────────────────────────────
+    it("37 (H-04b-c) — coin A earlyUnlock then coin A at HIGHER severity: vault FREEZES", async function () {
+        const vaultAddr = await vault.getAddress();
+
+        await earlyUnlockAndAdvanceToNormal();
+
+        // earlyUnlockAndAdvanceToNormal uses score=CONFIRMED_THRESHOLD=2 so severityAtUnlock=2.
+        // A new depeg at level 3 > 2 must bypass suppression and freeze.
+        await receiver.connect(forwarder).onReport("0x",
+            encodeReport([coin.address], [3], 3));
+
+        expect(await vault.paused()).to.equal(true,
+            "vault MUST freeze when coin A re-depegs at higher severity than the suppression threshold");
+        expect(await holdLedger.activeHoldCount(vaultAddr)).to.equal(1n);
     });
 
 });

@@ -77,7 +77,7 @@ interface ICustomerOverrideModule {
         uint8   score
     ) external;
     function isHoldActive(address coin, address vault) external view returns (bool);
-    function isSuppressed(bytes32 rootIncidentId, address vault, uint8 score) external view returns (bool);
+    function isSuppressed(bytes32 rootIncidentId, address coin, address vault, uint8 score) external view returns (bool);
 }
 
 /**
@@ -586,7 +586,7 @@ contract StableGuardCREReceiver {
                 address om = overrideModule;
                 if (om != address(0)) {
                     bytes32 rootId = eventRegistry.getEventRootIncidentId(eventId);
-                    if (ICustomerOverrideModule(om).isSuppressed(rootId, vault, level)) {
+                    if (ICustomerOverrideModule(om).isSuppressed(rootId, coin, vault, level)) {
                         emit ProtectionSuppressed(coin, vault, rootId);
                         continue;
                     }
