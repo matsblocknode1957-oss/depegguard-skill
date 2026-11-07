@@ -14,10 +14,7 @@
  *   3. receiver.setOverrideModule(module)          — enables override path in receiver
  *   4. holdLedger.approveVaultModule(vault, module)— grants module the right to call releaseByOverride
  *
- * NOTE: The Morpho adapter path (setMorphoAdapter) requires the receiver's vault to implement
- * owner().  StableGuardVault uses AccessControl, not Ownable, so setMorphoAdapter is not
- * available on this deployment.  For a Morpho-path demo, deploy a separate receiver with
- * MockMorphoVaultV2 as its vault.
+ * Run BEFORE demo-wire-morpho.js and remediate-role-revocation.js.
  */
 
 const hre  = require("hardhat");
@@ -96,14 +93,8 @@ async function main() {
     console.log("\n── CustomerOverrideModule wiring complete ─────────────────────────");
     console.log("  MockSafe (override authority): ", mockSafeAddr);
     console.log("  CustomerOverrideModule:        ", moduleAddr);
-    console.log("\nNext steps:");
-    console.log("  1. Stage depeg:  $env:PRICE='94000000'; npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia");
-    console.log("  2. First report: $env:SCENARIO='depeg'; npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia");
-    console.log("  3. Second report (freezes vault):");
-    console.log("                   $env:SCENARIO='depeg'; npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia");
-    console.log("  4. Place hold:   npx hardhat run scripts/demo-place-hold.js --network arbitrumSepolia");
-    console.log("  5. Early unlock: npx hardhat run scripts/demo-early-unlock.js --network arbitrumSepolia");
-    console.log("  6. Recovery (3x stable): $env:SCENARIO='stable'; $env:COUNT='3'; npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia");
+    console.log("\nNext: run demo-wire-morpho.js (Morpho infrastructure wiring)");
+    console.log("Then: run remediate-role-revocation.js (LAST — strips operational roles)");
 }
 
 main().catch(err => {
