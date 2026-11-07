@@ -41,9 +41,10 @@ module.exports = {
         },
     },
     etherscan: {
-        apiKey: {
-            arbitrumSepolia: process.env.ARBISCAN_API_KEY ?? "",
-        },
+        apiKey: process.env.ETHERSCAN_API_KEY || process.env.ARBISCAN_API_KEY || "",
+    },
+    sourcify: {
+        enabled: false,
     },
     paths: {
         sources:   "./stableguard-cre/contracts",

@@ -22,7 +22,7 @@ Required variables in `stableguard-cre\.env` (names only — never paste values)
 | Variable | Required? | Used by |
 |---|---|---|
 | `CRE_ETH_PRIVATE_KEY` | **Required** | Hardhat accounts (all deploy/demo scripts) and CRE CLI `--broadcast` signing |
-| `ARBISCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
+| `ETHERSCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
 
 > `ARB_SEPOLIA_RPC_URL` is **hardcoded** in `hardhat.config.js` and does not need to be set.
 > `USE_DEMO_FORWARDER=1` is set inline in PowerShell (`$env:USE_DEMO_FORWARDER="1"`) immediately before the deploy command — never persisted in `.env`.
@@ -725,7 +725,7 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
 | Variable | Required? | Used by |
 |---|---|---|
 | `CRE_ETH_PRIVATE_KEY` | **Required** | Hardhat accounts (all deploy/demo scripts) and CRE CLI `--broadcast` signing |
-| `ARBISCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
+| `ETHERSCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
 
 > `ARB_SEPOLIA_RPC_URL` is hardcoded in `hardhat.config.js` — not an env variable.
 > `USE_DEMO_FORWARDER=1` is set inline in PowerShell immediately before the deploy command — never in `.env`.
@@ -734,7 +734,7 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
 
 ```
  1. Fund deployer wallet with Arbitrum Sepolia ETH and USDC
- 2. Set CRE_ETH_PRIVATE_KEY (and ARBISCAN_API_KEY if verifying) in stableguard-cre\.env
+ 2. Set CRE_ETH_PRIVATE_KEY (and ETHERSCAN_API_KEY if verifying) in stableguard-cre\.env
 
  3. Deploy core contracts (demo mode):
       $env:USE_DEMO_FORWARDER="1"
