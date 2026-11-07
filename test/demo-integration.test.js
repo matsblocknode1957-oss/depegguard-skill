@@ -14,14 +14,14 @@
  *   time.increase(1800)                → cooldown elapsed
  *   STABLE   × 1                      → NORMAL, vault.paused() = false (auto-unfreeze)
  *
- * Scene 2 — human override + ProtectionSuppressed:
+ * Scene 2 — human override + ProtectionSuppressed (HOLD_PAUSED path):
  *   CRITICAL × 2 to main receiver → new incident; vault freezes (NOT suppressed from Scene 1)
  *   placeHold                      → override hold active
- *   earlyUnlock via MockSafe       → vault.paused() = false immediately (KEY MOMENT)
- *   STABLE × 3                     → RECOVERY_PENDING
- *   time.increase(1800)            → cooldown elapsed
- *   STABLE × 1                     → NORMAL
- *   CRITICAL × 2 (new incident)   → ProtectionSuppressed emitted; vault stays unpaused
+ *   STABLE × 3                     → RECOVERY_PENDING; hold active → destination HOLD_PAUSED
+ *   time.increase(1800)            → recoveryCooldown elapsed
+ *   earlyUnlock via MockSafe       → HOLD_PAUSED → COMPLETE → NORMAL in one tx (KEY MOMENT 1)
+ *                                     vault.paused() = false; suppression window active
+ *   CRITICAL × 2 (new incident)   → ProtectionSuppressed emitted; vault stays unpaused (KEY MOMENT 2)
  */
 
 const { ethers }  = require("hardhat");
@@ -282,13 +282,12 @@ describe("Demo integration — two-scene end-to-end", function () {
 
     // ─── Scene 2 ─────────────────────────────────────────────────────────────
 
-    it("Scene 2 — human override: earlyUnlock unfreezes vault immediately; ProtectionSuppressed on new incident within window", async function () {
+    it("Scene 2 — human override: HOLD_PAUSED path; earlyUnlock finalises event to NORMAL in one tx; ProtectionSuppressed on new incident within window", async function () {
         const vaultAddr  = await vault.getAddress();
         const moduleAddr = await overrideModule.getAddress();
 
         // ── Verify: no suppression active before Scene 2 (no earlyUnlock in Scene 1) ──
-        // This confirms Scene 2 is not suppressed from a prior Scene 1 earlyUnlock.
-        // isSuppressed requires a rootIncidentId; bytes32(0) covers the coin-level check
+        // isSuppressed with bytes32(0) covers the coin-level suppression check
         expect(
             await overrideModule.isSuppressed(ethers.ZeroHash, COIN, vaultAddr, 3)
         ).to.equal(false, "no suppression should be active at the start of Scene 2");
@@ -304,40 +303,50 @@ describe("Demo integration — two-scene end-to-end", function () {
         ).to.equal(true, "hold slot must be registered after freeze");
 
         // ── placeHold → override hold becomes active ───────────────────────────
+        const holdSlot       = await overrideModule.overrideHolds(COIN, vaultAddr);
+        const rootIncidentId = holdSlot.rootIncidentId;
         await overrideModule.connect(governance).placeHold(COIN, vaultAddr);
         expect(
             await overrideModule.isHoldActive(COIN, vaultAddr)
         ).to.equal(true, "hold must be active after placeHold");
 
-        // ── earlyUnlock via MockSafe → vault.paused() = false immediately ───────
-        const holdSlot      = await overrideModule.overrideHolds(COIN, vaultAddr);
-        const rootIncidentId = holdSlot.rootIncidentId;
+        // ── STABLE × 3: recovery is blocked by active hold → destination HOLD_PAUSED ──
+        // The 3rd stable report triggers RECOVERY_PENDING via _applyAutoRecovery (which
+        // resets destinations to PENDING).  The active hold causes the receiver to call
+        // markHoldPaused(eventId, 0), transitioning the slot to HOLD_PAUSED.
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
+        // vault is still paused: the override hold is blocking recovery
+        expect(await vault.paused()).to.equal(true, "vault must stay paused while override hold is blocking recovery");
 
+        // ── Wait recoveryCooldown (1800 s) ─────────────────────────────────────
+        await time.increase(1800);
+        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 10n;
+
+        // ── earlyUnlock via MockSafe: HOLD_PAUSED → COMPLETE → NORMAL in one tx ──
+        // With recoveryCooldown elapsed and destination in HOLD_PAUSED, executeEarlyUnlock
+        // calls destinationCallback(HOLD_PAUSED → COMPLETE) → _evaluateRecovery → NORMAL.
         const unlockReceipt = await (await mockSafe.connect(governance).callEarlyUnlock(
             moduleAddr, COIN, vaultAddr, rootIncidentId
         )).wait();
 
-        // KEY MOMENT: vault is unpaused immediately
+        // KEY MOMENT 1: vault is unpaused immediately after earlyUnlock
         expect(await vault.paused()).to.equal(false, "vault must be unpaused immediately after earlyUnlock");
 
-        // EarlyUnlockExecuted event on receiver confirms the call chain completed
+        // EarlyUnlockExecuted on receiver confirms the full call chain completed
         const unlockEvents = findEvent(unlockReceipt, receiver.interface, "EarlyUnlockExecuted");
         expect(unlockEvents.length).to.equal(1, "EarlyUnlockExecuted must be emitted");
 
-        // ── Recovery: 3 STABLE → RECOVERY_PENDING ─────────────────────────────
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        // Vault is already unpaused; receiver confirms the hold is released.
+        // Event terminates to NORMAL inside the earlyUnlock tx (HOLD_PAUSED path)
+        const termEvents = findEvent(unlockReceipt, eventReg.interface, "EventTerminated");
+        expect(termEvents.length).to.equal(1, "EventTerminated must fire inside earlyUnlock tx (HOLD_PAUSED path)");
+        expect(termEvents[0].args.terminal).to.equal(7n, "event must terminate to NORMAL (7)");
 
-        // ── Cooldown + finalize → NORMAL ──────────────────────────────────────
-        await time.increase(1800);
-        _ts = BigInt((await ethers.provider.getBlock("latest")).timestamp) - 10n;
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-
-        // ── New incident within suppression window → ProtectionSuppressed ──────
-        // Suppression window is 3600s. We're ~1800s past earlyUnlock. Well within window.
-        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // WATCH (new incident)
+        // ── KEY MOMENT 2: New incident within suppression window → ProtectionSuppressed ──
+        // earlyUnlock wrote _coinVaultSuppressions[USDC][vault] with suppressUntil = now + 3600.
+        // We are ~1800 s past earlyUnlock — well within the suppression window.
+        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // WATCH (new incident, new rootIncidentId)
         const suppressedReceipt = await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CONFIRMED_DEPEG attempt
 
         const suppressedEvents = findEvent(suppressedReceipt, receiver.interface, "ProtectionSuppressed");
