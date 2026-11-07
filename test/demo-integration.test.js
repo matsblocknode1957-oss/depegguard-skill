@@ -14,14 +14,15 @@
  *   time.increase(1800)                → cooldown elapsed
  *   STABLE   × 1                      → NORMAL, vault.paused() = false (auto-unfreeze)
  *
- * Scene 2 — human override + ProtectionSuppressed (HOLD_PAUSED path):
- *   CRITICAL × 2 to main receiver → new incident; vault freezes (NOT suppressed from Scene 1)
- *   placeHold                      → override hold active
- *   STABLE × 3                     → RECOVERY_PENDING; hold active → destination HOLD_PAUSED
- *   time.increase(1800)            → recoveryCooldown elapsed
- *   earlyUnlock via MockSafe       → HOLD_PAUSED → COMPLETE → NORMAL in one tx (KEY MOMENT 1)
- *                                     vault.paused() = false; suppression window active
- *   CRITICAL × 2 (new incident)   → ProtectionSuppressed emitted; vault stays unpaused (KEY MOMENT 2)
+ * Scene 2 — human override + ProtectionSuppressed (price-driven HOLD_PAUSED path):
+ *   CRITICAL × 2 (CRE at $0.94)       → new incident; vault freezes (NOT suppressed from Scene 1)
+ *   placeHold                           → override hold active; customer controls exit
+ *   STABLE   × 3 (CRE at $1.00)       → RECOVERY_PENDING; hold active → destination HOLD_PAUSED
+ *                                          price recovered but vault stays frozen
+ *   time.increase(1800)                → recoveryCooldown elapsed
+ *   earlyUnlock via MockSafe           → HOLD_PAUSED → COMPLETE → NORMAL in one tx (KEY MOMENT 1)
+ *                                          vault.paused() = false; suppression window active
+ *   CRITICAL × 2 (CRE at $0.94 again) → ProtectionSuppressed emitted; vault stays unpaused (KEY MOMENT 2)
  */
 
 const { ethers }  = require("hardhat");
@@ -292,9 +293,9 @@ describe("Demo integration — two-scene end-to-end", function () {
             await overrideModule.isSuppressed(ethers.ZeroHash, COIN, vaultAddr, 3)
         ).to.equal(false, "no suppression should be active at the start of Scene 2");
 
-        // ── Freeze: 2 CRITICAL → vault.paused() = true (new incident) ──────────
-        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // WATCH
-        await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CONFIRMED_DEPEG
+        // ── Freeze: 2 CRITICAL (CRE at $0.94) → vault.paused() = true ──────────
+        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // CRITICAL at $0.94 → WATCH
+        await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CRITICAL at $0.94 → CONFIRMED_DEPEG
         expect(await vault.paused()).to.equal(true, "vault must be paused on Scene 2 CONFIRMED_DEPEG");
 
         // Hold was registered automatically in onReport
@@ -310,14 +311,15 @@ describe("Demo integration — two-scene end-to-end", function () {
             await overrideModule.isHoldActive(COIN, vaultAddr)
         ).to.equal(true, "hold must be active after placeHold");
 
-        // ── STABLE × 3: recovery is blocked by active hold → destination HOLD_PAUSED ──
+        // ── STABLE × 3 (CRE at $1.00): recovery is blocked by active hold → HOLD_PAUSED ──
+        // TestPriceFeed reset to $1.00 before these calls; CRE produces compositeScore 0 (STABLE).
         // The 3rd stable report triggers RECOVERY_PENDING via _applyAutoRecovery (which
         // resets destinations to PENDING).  The active hold causes the receiver to call
         // markHoldPaused(eventId, 0), transitioning the slot to HOLD_PAUSED.
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        await sendReport(forwarderSigner, receiver, COIN, 0, 0);
-        // vault is still paused: the override hold is blocking recovery
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+        // price has recovered but the customer keeps the vault locked
         expect(await vault.paused()).to.equal(true, "vault must stay paused while override hold is blocking recovery");
 
         // ── Wait recoveryCooldown (1800 s) ─────────────────────────────────────
@@ -343,11 +345,11 @@ describe("Demo integration — two-scene end-to-end", function () {
         expect(termEvents.length).to.equal(1, "EventTerminated must fire inside earlyUnlock tx (HOLD_PAUSED path)");
         expect(termEvents[0].args.terminal).to.equal(7n, "event must terminate to NORMAL (7)");
 
-        // ── KEY MOMENT 2: New incident within suppression window → ProtectionSuppressed ──
-        // earlyUnlock wrote _coinVaultSuppressions[USDC][vault] with suppressUntil = now + 3600.
-        // We are ~1800 s past earlyUnlock — well within the suppression window.
-        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // WATCH (new incident, new rootIncidentId)
-        const suppressedReceipt = await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CONFIRMED_DEPEG attempt
+        // ── KEY MOMENT 2: New incident (CRE at $0.94) → ProtectionSuppressed ──
+        // TestPriceFeed reset to $0.94; earlyUnlock wrote _coinVaultSuppressions[USDC][vault]
+        // with suppressUntil = now + 3600.  We are ~1800 s past earlyUnlock — still inside the window.
+        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // CRITICAL at $0.94 → WATCH (new incident)
+        const suppressedReceipt = await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CRITICAL at $0.94 → CONFIRMED_DEPEG attempt
 
         const suppressedEvents = findEvent(suppressedReceipt, receiver.interface, "ProtectionSuppressed");
         expect(suppressedEvents.length).to.equal(1, "ProtectionSuppressed must fire for same-severity incident within window");
@@ -356,6 +358,32 @@ describe("Demo integration — two-scene end-to-end", function () {
 
         // KEY SAFETY: vault is NOT frozen — the freeze was suppressed
         expect(await vault.paused()).to.equal(false, "vault must NOT be frozen during suppression window");
+    });
+
+    it("Scene 2 step 26 — vault stays frozen during HOLD_PAUSED: hold overrides auto-recovery when price recovers", async function () {
+        const vaultAddr = await vault.getAddress();
+
+        // S2 Steps 22–23: CRITICAL × 2 (CRE at $0.94) → CONFIRMED_DEPEG + vault freeze
+        await sendReport(forwarderSigner, receiver, COIN, 1, 1); // CRITICAL at $0.94 → WATCH
+        await sendReport(forwarderSigner, receiver, COIN, 3, 3); // CRITICAL at $0.94 → CONFIRMED_DEPEG
+        expect(await vault.paused()).to.equal(true, "vault frozen after CONFIRMED_DEPEG");
+
+        // S2 Step 24: placeHold → override hold active
+        await overrideModule.connect(governance).placeHold(COIN, vaultAddr);
+        expect(await overrideModule.isHoldActive(COIN, vaultAddr)).to.equal(true, "hold must be active after placeHold");
+
+        // S2 Step 26: STABLE × 3 (CRE at $1.00) → stabilityWindow met → RECOVERY_PENDING
+        // Without a hold, _applyAutoRecovery would unpause the vault automatically (NORMAL).
+        // With an active hold, the receiver marks destination HOLD_PAUSED instead.
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+        await sendReport(forwarderSigner, receiver, COIN, 0, 0); // STABLE: CRE at $1.00
+
+        // KEY MOMENT: price has recovered but the customer keeps the vault locked
+        expect(await vault.paused()).to.equal(
+            true,
+            "vault must stay frozen: hold overrides auto-recovery even when price has recovered to $1.00"
+        );
     });
 
     // ─── Cross-scene validation ───────────────────────────────────────────────

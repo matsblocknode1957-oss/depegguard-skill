@@ -537,7 +537,7 @@ S1 Steps 1 and 4 (price set/reset) do not use the CRE tool and are unchanged.
 
 ---
 
-## Scene 2 — Human override: HOLD\_PAUSED path → earlyUnlock finalises event + ProtectionSuppressed
+## Scene 2 — Human override: earlyUnlock → vault unfreeze + ProtectionSuppressed
 
 Begins immediately after Scene 1 completes (event in NORMAL state, vault unpaused).
 
@@ -563,7 +563,7 @@ cre workflow simulate . --target=arbitrum-demo-settings --broadcast
 Set-Location ..\..
 ```
 
-New incident: state **NORMAL → WATCH**. This is a fresh rootIncidentId — not suppressed by Scene 1.
+TestPriceFeed reads $0.94 → compositeScore 3 (CRITICAL). New incident: state **NORMAL → WATCH**. Fresh rootIncidentId — not suppressed by Scene 1.
 
 ---
 
@@ -575,10 +575,12 @@ cre workflow simulate . --target=arbitrum-demo-settings --broadcast
 Set-Location ..\..
 ```
 
+TestPriceFeed still $0.94 → CRITICAL again.
+
 Arbiscan:
 - DepegEventRegistry: `ProtectionInitiated(eventId, coin, destCount=1)`
 - ProtectionHoldLedger: `HoldAcquired(holdId, vault, coin, ...)`
-- StableGuardVault: `Paused(account=receiver)` ← **KEY MOMENT 0**: vault frozen
+- StableGuardVault: `Paused(account=receiver)` ← **KEY MOMENT 0**: vault frozen automatically
 
 ---
 
@@ -588,38 +590,53 @@ Arbiscan:
 npx hardhat run scripts/demo-place-hold.js --network arbitrumSepolia
 ```
 
-MockSafe activates the override hold. The module records the `rootIncidentId` for this incident so the early unlock call can reference it. The vault remains paused — placing a hold does not unpause.
+MockSafe activates the override hold. The module records the `rootIncidentId` for this incident so the early unlock call can reference it.
+
+_The vault remains paused — placing a hold does not unpause. The customer is now in control of the exit._
 
 ---
 
-### S2 Step 5 — Inject 3×STABLE while price is still $0.94 → RECOVERY\_PENDING + HOLD\_PAUSED
-
-The TestPriceFeed is still at $0.94; `cre workflow simulate` would produce CRITICAL at this price. Use `demo-send-report.js` to inject STABLE reports directly:
+### S2 Step 5 — Reset TestPriceFeed to $1.00 (peg restored)
 
 ```powershell
-$env:SCENARIO="stable"
-$env:COUNT="3"
-npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO
-Remove-Item Env:COUNT
+$env:RESET="1"
+npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
+Remove-Item Env:RESET
 ```
 
-What happens:
-1. 3 consecutive STABLE reports satisfy `stabilityWindow=3` → `_applyAutoRecovery` sets state to **RECOVERY_PENDING**.
-2. The active override hold causes the receiver to call `markHoldPaused(eventId, 0)` — destination state becomes **HOLD_PAUSED**.
-3. `vault.paused()` = **true** (hold is still blocking recovery).
+The price oracle now reads $1.00. Future `cre workflow simulate` calls will produce STABLE (compositeScore 0) reports.
 
 ---
 
-### S2 Step 6 — Wait recoveryCooldown (1800 s — do offscreen)
+### S2 Step 6 — CRE simulate × 3: STABLE → RECOVERY\_PENDING; hold forces HOLD\_PAUSED
+
+```powershell
+Set-Location stableguard-cre\depeg-monitor
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+Set-Location ..\..
+```
+
+TestPriceFeed reads $1.00 → compositeScore 0 (STABLE) on each call. What happens:
+
+1. 3 consecutive STABLE reports satisfy `stabilityWindow=3` → `_applyAutoRecovery` sets state to **RECOVERY_PENDING**.
+2. The active override hold causes the receiver to call `markHoldPaused(eventId, 0)` — destination state becomes **HOLD_PAUSED**.
+3. `vault.paused()` = **true**.
+
+> _Price has recovered, but the customer keeps the vault locked._ The hold overrides the automatic recovery path — `vault.unpause()` will not be called until the customer explicitly authorises it via `earlyUnlock`.
+
+---
+
+### S2 Step 7 — Wait recoveryCooldown (1800 s — do offscreen)
 
 The `recoveryCooldown` is 1800 s on testnet. The early unlock will fail until this has elapsed.
 
-> **Demo tip**: cut the recording after the HOLD_PAUSED transition. Note "30-minute cooldown", then resume at S2 Step 7.
+> **Demo tip**: cut the recording after the HOLD_PAUSED transition. Note "30-minute cooldown", then resume at S2 Step 8.
 
 ---
 
-### S2 Step 7 — demo-early-unlock.js → vault unpaused + event terminates to NORMAL in one tx
+### S2 Step 8 — demo-early-unlock.js → vault unpaused + event terminates to NORMAL in one tx
 
 ```powershell
 npx hardhat run scripts/demo-early-unlock.js --network arbitrumSepolia
@@ -634,63 +651,63 @@ This single transaction does everything:
 Arbiscan:
 - ProtectionHoldLedger: `HoldReleasedByOverride(holdId, vault, ...)`
 - StableGuardCREReceiver: `EarlyUnlockExecuted(coin, vault)`
-- StableGuardVault: `Unpaused(account=receiver)` ← **KEY MOMENT 1**: vault unpaused
+- StableGuardVault: `Unpaused(account=receiver)` ← **KEY MOMENT 1**: Safe releases; vault unpaused by customer's own hand
 - DepegEventRegistry: `EventTerminated(eventId, coin, terminal=NORMAL)` ← event closed in same tx
 
 `vault.paused()` = **false** immediately. Suppression window now active for (USDC, vault) — `suppressionWindow` seconds from this tx.
 
 ---
 
-### S2 Step 8 — CRE simulate: NORMAL → WATCH (new incident, suppression window active)
+### S2 Step 9 — Stage the depeg price again (TestPriceFeed → $0.94)
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-Set-Location ..\..
+$env:PRICE="94000000"
+npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
+Remove-Item Env:PRICE
 ```
-
-A new incident starts. The first report reaches WATCH — `ProtectionSuppressed` fires only on the CONFIRMED_DEPEG step, so this first simulate proceeds normally.
 
 ---
 
-### S2 Step 9 — CRE simulate: WATCH → CONFIRMED\_DEPEG attempt → ProtectionSuppressed
+### S2 Step 10 — CRE simulate × 2: ProtectionSuppressed (vault stays unpaused)
 
 ```powershell
 Set-Location stableguard-cre\depeg-monitor
 cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-settings --broadcast
 Set-Location ..\..
 ```
 
-The second report would reach CONFIRMED_DEPEG, but the coin-vault suppression set in S2 Step 7 is still active. The receiver detects it and blocks the freeze.
+TestPriceFeed reads $0.94 → CRITICAL on both reports. The first simulate advances the new incident from NORMAL → WATCH (suppression is not checked at WATCH). The second simulate would advance WATCH → CONFIRMED_DEPEG — but the coin-vault suppression set in S2 Step 8 is still active.
 
 Arbiscan — StableGuardCREReceiver:
 - `ProtectionSuppressed(coin, vault, rootIncidentId)` ← **KEY MOMENT 2**
 - StableGuardVault: **no** `Paused` event
 - `vault.paused()` = **false** — customer override is in effect; same-severity reports cannot re-freeze during the suppression window
 
-> **Why two simulate calls?** The state machine requires WATCH before CONFIRMED_DEPEG. The first simulate advances the new incident from NORMAL → WATCH (suppression is not checked at WATCH). The second simulate would advance WATCH → CONFIRMED_DEPEG — this is where the receiver checks suppression and emits `ProtectionSuppressed` instead of pausing the vault.
+> _The customer's trust relationship prevents the protocol from re-freezing the vault during the suppression window, even on a new CRITICAL signal._
 
 ---
 
 ### BACKUP — Scene 2, if CRE simulate is unavailable
 
+Replace the CRE simulate steps with `demo-send-report.js`. All other steps (price set, place hold, wait, early unlock) are unchanged.
+
 ```powershell
 # BACKUP S2 Steps 2–3: two CRITICAL reports → freeze
-$env:SCENARIO="depeg"
-$env:COUNT="2"
+$env:SCENARIO="depeg"; $env:COUNT="2"
 npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO
-Remove-Item Env:COUNT
+Remove-Item Env:SCENARIO, Env:COUNT
 
-# BACKUP S2 Steps 8–9: two CRITICAL reports → ProtectionSuppressed
-$env:SCENARIO="depeg"
-$env:COUNT="2"
+# BACKUP S2 Step 6: three STABLE reports → RECOVERY_PENDING + HOLD_PAUSED
+$env:SCENARIO="stable"; $env:COUNT="3"
 npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-Remove-Item Env:SCENARIO
-Remove-Item Env:COUNT
+Remove-Item Env:SCENARIO, Env:COUNT
+
+# BACKUP S2 Step 10: two CRITICAL reports → ProtectionSuppressed
+$env:SCENARIO="depeg"; $env:COUNT="2"
+npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
+Remove-Item Env:SCENARIO, Env:COUNT
 ```
-
-S2 Steps 1, 4, 5, 6, 7 (price set, place hold, stable inject, wait, early unlock) do not use the CRE tool and are unchanged.
 
 ---
 
@@ -835,32 +852,39 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Set-Location ..\..
        (vault.paused() = true — KEY MOMENT 0)
 
-24. demo-place-hold.js  →  override hold active
+24. demo-place-hold.js  →  override hold active; customer in control of exit
        npx hardhat run scripts/demo-place-hold.js --network arbitrumSepolia
 
-25. demo-send-report.js STABLE×3 (price still $0.94) →  RECOVERY_PENDING + HOLD_PAUSED
-       $env:SCENARIO="stable"; $env:COUNT="3"
-       npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
-       Remove-Item Env:SCENARIO, Env:COUNT
-       (hold blocking recovery: vault stays paused)
+25. demo-set-price.js → $1.00 (peg restored; CRE simulate will now produce STABLE)
+       $env:RESET="1"
+       npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
+       Remove-Item Env:RESET
 
-26. Wait 1800 s (30 min — do offscreen)
+26. cre workflow simulate --broadcast × 3 (main only) →  RECOVERY_PENDING + HOLD_PAUSED (vault stays frozen)
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
+       (price recovered but hold overrides auto-recovery — vault.paused() = true)
 
-27. demo-early-unlock.js  →  vault.paused() = false + EventTerminated(NORMAL) in one tx (KEY MOMENT 1)
+27. Wait 1800 s (30 min — do offscreen)
+
+28. demo-early-unlock.js  →  vault.paused() = false + EventTerminated(NORMAL) in one tx (KEY MOMENT 1)
        npx hardhat run scripts/demo-early-unlock.js --network arbitrumSepolia
-       (EarlyUnlockExecuted + vault unpaused + EventTerminated(NORMAL) all in one transaction)
+       (Safe releases: EarlyUnlockExecuted + vault unpaused + EventTerminated(NORMAL) all in one tx)
 
-28. cre workflow simulate --broadcast × 1 (main only) →  WATCH (new incident, suppression window active)
+29. demo-set-price.js → $0.94 (new CRITICAL attempt during suppression window)
+       $env:PRICE="94000000"
+       npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
+       Remove-Item Env:PRICE
+
+30. cre workflow simulate --broadcast × 2 (main only) →  ProtectionSuppressed (KEY MOMENT 2)
        Set-Location stableguard-cre\depeg-monitor
        cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       Set-Location ..\..
-
-29. cre workflow simulate --broadcast × 1 (main only) →  ProtectionSuppressed (KEY MOMENT 2)
-       Set-Location stableguard-cre\depeg-monitor
        cre workflow simulate . --target=arbitrum-demo-settings --broadcast
        Set-Location ..\..
-       (ProtectionSuppressed on receiver; vault.paused() = false — override in effect)
-       (two simulate calls needed: 1st reaches WATCH, 2nd triggers suppression at CONFIRMED_DEPEG)
+       (ProtectionSuppressed on receiver; vault.paused() = false — customer override in effect)
 
 --- RECORDING ENDS ---
 ```
