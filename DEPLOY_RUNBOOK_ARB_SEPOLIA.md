@@ -12,7 +12,7 @@ Open PowerShell in the repo root (`C:\Users\charl\depegguard-skill`).
 git checkout release/redeploy-bundle
 git status          # must be clean (or stash any tmp_* scratch files)
 npx hardhat compile # zero errors, zero warnings
-npx hardhat test    # 333 passing, 2 pending (fork tests)
+npx hardhat test    # 337 passing, 2 pending (fork tests)
 ```
 
 Review every contract diff against the previous deploy tag. Confirm the new deployer wallet has ETH on Arbitrum Sepolia (Arbiscan balance check). Record the new deployer address before continuing.
@@ -134,7 +134,20 @@ and `chainSelector: "3478487238524512106"` are already correct for Arbitrum Sepo
 
 The CRE simulate tool writes through the chain's forwarder for that environment. For
 `ethereum-testnet-sepolia-arbitrum-1` in simulate mode this is the MockKeystoneForwarder
-(`0xd41263567ddfead91504199b8c6c87371e83ca5d`) — the same address the receiver trusts.
+(`0xd41263567ddfead91504199b8c6c87371e83ca5d`) — the same address both receivers trust.
+
+**After step 2f** (once MorphoCREReceiver is deployed), also fill in
+`stableguard-cre/depeg-monitor/config.arbitrum-demo-morpho.json`:
+
+```json
+"consumerAddress": "<MorphoCREReceiver from deployments/arbitrum-sepolia-demo.json>",
+...
+"demoFeedAddress": "<same TestPriceFeed address as above>"
+```
+
+Both configs use identical `coins`, `chainSelector`, and `demoFeedAddress` — the only
+difference is `consumerAddress`. The CRE workflow only supports one consumer per config,
+so each `cre workflow simulate --broadcast` run targets one receiver.
 
 ### 2e. Wire CustomerOverrideModule
 
@@ -180,6 +193,10 @@ This deploys three fresh contracts (MorphoDepegEventRegistry, MorphoProtectionHo
 `setMorphoAdapter` authenticates via `vault.owner()`. StableGuardVault uses AccessControl (no `owner()`), so `setMorphoAdapter` always reverts on the main receiver. MockMorphoVaultV2 has `owner() = deployer`, which satisfies the auth check and enables a separate `MorphoCREReceiver`.
 
 Saves `MorphoCREReceiver`, `MorphoDepegEventRegistry`, and `MorphoHoldLedger` addresses to `deployments/arbitrum-sepolia-demo.json`.
+
+After this script completes, fill in `config.arbitrum-demo-morpho.json` (see step 2d):
+- `consumerAddress` → `MorphoCREReceiver` address printed above
+- `demoFeedAddress` → same TestPriceFeed address used in `config.arbitrum-demo.json`
 
 ### Customer Safe options — MockSafe vs Real Safe
 
@@ -251,14 +268,16 @@ None of these roles can submit reports, acquire holds, or trigger freezes — on
 
 ## 3. Demo vault — Morpho path
 
-The demo uses two receivers, each targeting a different vault:
+The demo uses two receivers, each targeting a different vault and each with its own CRE config:
 
-| Receiver | Vault | Freeze action |
-|---|---|---|
-| `StableGuardCREReceiver` | `StableGuardVault` | `vault.pause()` |
-| `MorphoCREReceiver` | `MockMorphoVaultV2` | `adapter.onDepeg()` → zeroes Morpho market caps |
+| Receiver | Vault | CRE target | Freeze action |
+|---|---|---|---|
+| `StableGuardCREReceiver` | `StableGuardVault` | `arbitrum-demo-settings` | `vault.pause()` |
+| `MorphoCREReceiver` | `MockMorphoVaultV2` | `arbitrum-demo-morpho-settings` | `adapter.onDepeg()` → zeroes Morpho market caps |
 
-Both receivers share the same MockKeystoneForwarder. During Scene 1, reports are sent to both receivers in sequence — first the CRE simulate tool writes to the main receiver (vault pause), then `demo-send-morpho.js` writes directly to the Morpho receiver (caps zeroed). Both transactions are visible on Arbiscan in the same session.
+Both receivers share the same MockKeystoneForwarder and read from the same TestPriceFeed. During Scene 1, each cycle runs `cre workflow simulate --broadcast` twice — once per target — so both receivers receive the same report from the CRE tool in every step.
+
+**Why two receivers instead of one?** `StableGuardCREReceiver.setMorphoAdapter()` authenticates via `vault.owner()`, and `StableGuardVault` uses AccessControl with no `owner()` function, so the call always reverts on a receiver that targets the main vault. The Morpho path therefore requires a dedicated receiver instance backed by `MockMorphoVaultV2`, which does implement `owner()` — this is a constraint of the Morpho adapter's auth model, not a design choice.
 
 There is no real Morpho Vault V2 on Arbitrum Sepolia. MockMorphoVaultV2 (deployed by `deploy-demo-contracts-arbitrum.js`) implements every interface that MorphoSentinelAdapter calls and is fully tested. Morpho cap restoration after recovery is a vault-owner admin action — the protocol does not auto-restore caps.
 
@@ -285,9 +304,14 @@ No `--broadcast` — this is a dry run only. Confirm the JSON output shows `comp
 
 ### Demo mode — TestPriceFeed with `--broadcast`
 
-`config.arbitrum-demo.json` points `demoFeedAddress` at the deployed TestPriceFeed. The workflow reads that feed on-chain, computes the signal, ABI-encodes the report, and (with `--broadcast`) submits it via the CRE forwarder infrastructure to `consumerAddress` (the receiver).
+Two config files drive the demo, one per receiver:
 
-For `chainSelectorName: "ethereum-testnet-sepolia-arbitrum-1"` the simulate tool routes writes through the MockKeystoneForwarder (`0xd41263567ddfead91504199b8c6c87371e83ca5d`), which the receiver trusts. No DON signatures are verified.
+| Config file | CRE target | Receiver |
+|---|---|---|
+| `config.arbitrum-demo.json` | `arbitrum-demo-settings` | `StableGuardCREReceiver` (vault pause) |
+| `config.arbitrum-demo-morpho.json` | `arbitrum-demo-morpho-settings` | `MorphoCREReceiver` (Morpho cap-zeroing) |
+
+Both configs point `demoFeedAddress` at the same TestPriceFeed and use the same `chainSelectorName`. Each `cre workflow simulate --broadcast` run reads the TestPriceFeed, ABI-encodes the report, and writes to its own `consumerAddress` via the MockKeystoneForwarder (`0xd41263567ddfead91504199b8c6c87371e83ca5d`). No DON signatures are verified.
 
 ---
 
@@ -317,54 +341,42 @@ TestPriceFeed now returns $0.94 = 600 bps below peg → CRITICAL when the workfl
 
 ---
 
-### S1 Step 2 — CRE simulate cycle 1: NORMAL → WATCH
+### S1 Step 2 — CRE simulate cycle 1: NORMAL → WATCH (both receivers)
 
 ```powershell
 Set-Location stableguard-cre\depeg-monitor
 cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
 Set-Location ..\..
 ```
 
-The workflow reads TestPriceFeed ($0.94), classifies USDC as CRITICAL (signalLevel=3,
-compositeScore=3), ABI-encodes the report, and writes it on-chain via the MockKeystoneForwarder.
-The receiver calls `eventRegistry.processReport` → state: **NORMAL → WATCH**.
+Both configs read the same TestPriceFeed ($0.94 → CRITICAL) and write via the same
+MockKeystoneForwarder. Each receiver advances its own event registry: **NORMAL → WATCH**.
 
-Arbiscan — DepegEventRegistry: `EventAdvanced(NORMAL → WATCH)`
+Arbiscan — DepegEventRegistry (main): `EventAdvanced(NORMAL → WATCH)`
+Arbiscan — MorphoDepegEventRegistry: `EventAdvanced(NORMAL → WATCH)`
 
 ---
 
-### S1 Step 3 — CRE simulate cycle 2: WATCH → CONFIRMED\_DEPEG + vault freeze
+### S1 Step 3 — CRE simulate cycle 2: WATCH → CONFIRMED\_DEPEG + vault freeze + Morpho cap
 
 ```powershell
 Set-Location stableguard-cre\depeg-monitor
 cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
 Set-Location ..\..
 ```
 
-confirmedThreshold=2 → `ProtectionInitiated` fires: hold acquired, `vault.pause()` called.
+Both receivers reach CONFIRMED_DEPEG. The main receiver pauses the vault; the Morpho receiver calls `adapter.onDepeg()`.
 
-Arbiscan:
+Arbiscan — main receiver:
 - DepegEventRegistry: `EventAdvanced(WATCH → CONFIRMED_DEPEG)`, `ProtectionInitiated(eventId, coin, destCount=1)`
 - ProtectionHoldLedger: `HoldAcquired(holdId, vault, coin, ...)`
 - StableGuardVault: `Paused(account=receiver)`
 - `vault.paused()` = **true** ← show on Arbiscan
 
----
-
-### S1 Step 4 — Morpho cap: second CRITICAL report to MorphoCREReceiver
-
-```powershell
-$env:COUNT="2"
-npx hardhat run scripts/demo-send-morpho.js --network arbitrumSepolia
-Remove-Item Env:COUNT
-```
-
-Sends two CRITICAL reports directly to MorphoCREReceiver via the same MockKeystoneForwarder.
-The 1st report advances MorphoCREReceiver's registry to WATCH; the 2nd reaches CONFIRMED_DEPEG,
-triggering `adapter.onDepeg()`.
-
-Arbiscan — MorphoSentinelAdapter:
-- `MorphoCapsZeroed(coin=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, marketsCapped=1)` ← **KEY MOMENT**
+Arbiscan — Morpho receiver:
+- MorphoSentinelAdapter: `MorphoCapsZeroed(coin=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48, marketsCapped=1)` ← **KEY MOMENT**
 - `adapter.absoluteCap(marketId)` = 0
 - `adapter.relativeCap(marketId)` = 0
 
@@ -374,7 +386,7 @@ Arbiscan — MorphoSentinelAdapter:
 
 ---
 
-### S1 Step 5 — Reset price to peg
+### S1 Step 4 — Reset price to peg
 
 ```powershell
 $env:RESET="1"
@@ -386,9 +398,10 @@ TestPriceFeed now returns $1.00 = 0 bps → STABLE.
 
 ---
 
-### S1 Step 6 — CRE simulate cycles 3 × STABLE → RECOVERY\_PENDING
+### S1 Step 5 — CRE simulate cycles 3 × STABLE → RECOVERY\_PENDING
 
-Run the simulate three times (the stabilityWindow=3 requires three consecutive stable reports):
+Run the simulate three times (the stabilityWindow=3 requires three consecutive stable reports).
+Only the main receiver is needed for recovery — the Morpho story is complete after Step 3.
 
 ```powershell
 Set-Location stableguard-cre\depeg-monitor
@@ -405,7 +418,7 @@ Arbiscan — DepegEventRegistry: `EventAdvanced(PROTECTED → RECOVERY_PENDING)`
 
 ---
 
-### S1 Step 7 — Wait cooldown, then final cycle → NORMAL (vault auto-unpauses)
+### S1 Step 6 — Wait cooldown, then final cycle → NORMAL (vault auto-unpauses)
 
 After 1800 s (30 min), run one more cycle. `finalizeRecovery` becomes callable and the
 receiver calls it, transitioning the event to **NORMAL** and calling `vault.unpause()` automatically — **no human action**.
@@ -421,7 +434,7 @@ Arbiscan:
 - StableGuardVault: `Unpaused(account=receiver)`
 - `vault.paused()` = **false** ← show on Arbiscan — vault unfroze with no human action
 
-> **Demo tip**: the 30-minute cooldown happens offscreen between S1 Step 6 and S1 Step 7.
+> **Demo tip**: the 30-minute cooldown happens offscreen between S1 Step 5 and S1 Step 6.
 > Cut the recording after the RECOVERY_PENDING transition, note "30-minute cooldown",
 > then resume to show the NORMAL state and auto-unpause.
 
@@ -429,17 +442,18 @@ Arbiscan:
 
 ### BACKUP — Scene 1, if CRE simulate is unavailable
 
-Replace S1 Steps 2–3 and S1 Steps 6–7 with `demo-send-report.js`. The report payload and receiver interaction are identical; the only difference is the transaction is sent directly by the deployer EOA rather than by the CRE DON.
+**BACKUP: main receiver (StableGuard vault)**
+Replace S1 Steps 2–3 and S1 Steps 5–6 with `demo-send-report.js`. The report payload and receiver interaction are identical; the only difference is the transaction is sent directly by the deployer EOA rather than by the CRE tool.
 
 ```powershell
-# BACKUP S1 Steps 2–3: two CRITICAL reports → freeze
+# BACKUP S1 Steps 2–3: two CRITICAL reports → vault freeze
 $env:SCENARIO="depeg"
 $env:COUNT="2"
 npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
 Remove-Item Env:SCENARIO
 Remove-Item Env:COUNT
 
-# BACKUP S1 Steps 6–7: three STABLE reports → recovery
+# BACKUP S1 Steps 5–6: three STABLE reports → recovery
 $env:SCENARIO="stable"
 $env:COUNT="3"
 npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
@@ -451,7 +465,17 @@ npx hardhat run scripts/demo-send-report.js --network arbitrumSepolia
 Remove-Item Env:SCENARIO
 ```
 
-S1 Step 1 (price set), S1 Step 4 (Morpho), S1 Step 5 (price reset) are unchanged.
+**BACKUP: Morpho receiver (MorphoCapsZeroed)**
+Replace the Morpho target runs in S1 Steps 2–3 with `demo-send-morpho.js`:
+
+```powershell
+# BACKUP S1 Steps 2–3 (Morpho side): two CRITICAL reports → MorphoCapsZeroed
+$env:COUNT="2"
+npx hardhat run scripts/demo-send-morpho.js --network arbitrumSepolia
+Remove-Item Env:COUNT
+```
+
+S1 Steps 1 and 4 (price set/reset) do not use the CRE tool and are unchanged.
 
 ---
 
@@ -672,6 +696,10 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
  8. Wire Morpho infrastructure (needs MockMorphoVaultV2.owner = deployer):
       npx hardhat run scripts/demo-wire-morpho.js --network arbitrumSepolia
 
+ 8b. Fill in stableguard-cre/depeg-monitor/config.arbitrum-demo-morpho.json:
+      consumerAddress  → MorphoCREReceiver address printed by step 8
+      demoFeedAddress  → same TestPriceFeed address as step 6
+
  9. Verify all 5 core contracts on Arbiscan (see Section 2g)
 
 10. Role revocation check — LAST wiring step:
@@ -704,68 +732,97 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
        Remove-Item Env:PRICE
 
-16. cre workflow simulate --broadcast × 1  →  WATCH
-       (EventAdvanced NORMAL→WATCH on DepegEventRegistry)
+16. S1 cycle 1 — WATCH on both receivers:
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..\..
+       (EventAdvanced NORMAL→WATCH on DepegEventRegistry and MorphoDepegEventRegistry)
 
-17. cre workflow simulate --broadcast × 1  →  CONFIRMED_DEPEG + vault freeze
-       (ProtectionInitiated, HoldAcquired, vault.paused() = true)
+17. S1 cycle 2 — CONFIRMED_DEPEG: vault freeze + MorphoCapsZeroed:
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..\..
+       (ProtectionInitiated, vault.paused() = true — KEY MOMENT 0)
+       (MorphoCapsZeroed on MorphoSentinelAdapter — KEY MOMENT)
 
-18. demo-send-morpho.js COUNT=2  →  MorphoCapsZeroed(marketsCapped=1)
-       $env:COUNT="2"
-       npx hardhat run scripts/demo-send-morpho.js --network arbitrumSepolia
-       Remove-Item Env:COUNT
-       (MorphoCapsZeroed on MorphoSentinelAdapter — show on Arbiscan)
-
-19. demo-set-price.js → $1.00 (STABLE)
+18. demo-set-price.js → $1.00 (STABLE)
        $env:RESET="1"
        npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
        Remove-Item Env:RESET
 
-20. cre workflow simulate --broadcast × 3  →  RECOVERY_PENDING (after 3rd stable cycle)
+19. cre workflow simulate --broadcast × 3 (main only) →  RECOVERY_PENDING
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
        (EventAdvanced PROTECTED→RECOVERY_PENDING on DepegEventRegistry)
 
-21. Wait 1800 s (30 min — do offscreen), then:
-    cre workflow simulate --broadcast × 1  →  NORMAL + vault auto-unpauses
+20. Wait 1800 s (30 min — do offscreen), then:
+    cre workflow simulate --broadcast × 1 (main only) →  NORMAL + vault auto-unpauses
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
        (EventTerminated NORMAL, vault.paused() = false — no human action)
 
 --- Scene 1 ends (vault unpaused automatically) ---
 
 --- SCENE 2: Human override ---
 
-22. demo-set-price.js → $0.94 (new incident)
+21. demo-set-price.js → $0.94 (new incident)
        $env:PRICE="94000000"
        npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
        Remove-Item Env:PRICE
 
-23. cre workflow simulate --broadcast × 1  →  WATCH (new incident, not suppressed)
+22. cre workflow simulate --broadcast × 1 (main only) →  WATCH (new incident, not suppressed)
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
 
-24. cre workflow simulate --broadcast × 1  →  CONFIRMED_DEPEG + vault freeze
+23. cre workflow simulate --broadcast × 1 (main only) →  CONFIRMED_DEPEG + vault freeze
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
        (vault.paused() = true — KEY MOMENT 0)
 
-25. demo-place-hold.js  →  override hold active
+24. demo-place-hold.js  →  override hold active
        npx hardhat run scripts/demo-place-hold.js --network arbitrumSepolia
 
-26. demo-early-unlock.js  →  vault.paused() = false (KEY MOMENT 1)
+25. demo-early-unlock.js  →  vault.paused() = false (KEY MOMENT 1)
        npx hardhat run scripts/demo-early-unlock.js --network arbitrumSepolia
        (EarlyUnlockExecuted on receiver, vault unpaused immediately)
 
-27. demo-set-price.js → $1.00 (STABLE)
+26. demo-set-price.js → $1.00 (STABLE)
        $env:RESET="1"
        npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
        Remove-Item Env:RESET
 
-28. cre workflow simulate --broadcast × 3  →  RECOVERY_PENDING
+27. cre workflow simulate --broadcast × 3 (main only) →  RECOVERY_PENDING
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
 
-29. Wait 1800 s (30 min — do offscreen), then:
-    cre workflow simulate --broadcast × 1  →  NORMAL
-       (suppressionWindow still active — 3600 s from earlyUnlock in step 26)
+28. Wait 1800 s (30 min — do offscreen), then:
+    cre workflow simulate --broadcast × 1 (main only) →  NORMAL
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
+       (suppressionWindow still active — 3600 s from earlyUnlock in step 25)
 
-30. demo-set-price.js → $0.94 (new CRITICAL attempt during suppression window)
+29. demo-set-price.js → $0.94 (new CRITICAL attempt during suppression window)
        $env:PRICE="94000000"
        npx hardhat run scripts/demo-set-price.js --network arbitrumSepolia
        Remove-Item Env:PRICE
 
-31. cre workflow simulate --broadcast × 2  →  ProtectionSuppressed (KEY MOMENT 2)
+30. cre workflow simulate --broadcast × 2 (main only) →  ProtectionSuppressed (KEY MOMENT 2)
+       Set-Location stableguard-cre\depeg-monitor
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
+       Set-Location ..\..
        (ProtectionSuppressed on receiver; vault.paused() = false — override in effect)
 
 --- RECORDING ENDS ---
@@ -779,6 +836,7 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
 - [ ] USDC exposure registered (`register-exposure.js`)
 - [ ] Demo contracts deployed — addresses in `deployments/arbitrum-sepolia-demo.json`
 - [ ] `config.arbitrum-demo.json` `consumerAddress` and `demoFeedAddress` filled in
+- [ ] `config.arbitrum-demo-morpho.json` `consumerAddress` (MorphoCREReceiver) and `demoFeedAddress` filled in
 - [ ] `demo-wire-all.js` completed successfully
 - [ ] `demo-wire-morpho.js` completed successfully — MorphoCREReceiver in demo JSON
 - [ ] `remediate-role-revocation.js` reports all three roles revoked ✓
