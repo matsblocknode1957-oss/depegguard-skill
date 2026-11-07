@@ -40,6 +40,11 @@ module.exports = {
             chainId:  421614,
         },
     },
+    etherscan: {
+        apiKey: {
+            arbitrumSepolia: process.env.ARBISCAN_API_KEY ?? "",
+        },
+    },
     paths: {
         sources:   "./stableguard-cre/contracts",
         tests:     "./test",

@@ -17,14 +17,15 @@ npx hardhat test    # 337 passing, 2 pending (fork tests)
 
 Review every contract diff against the previous deploy tag. Confirm the new deployer wallet has ETH on Arbitrum Sepolia (Arbiscan balance check). Record the new deployer address before continuing.
 
-Required `.env` variables in the repo root (names only — never paste values):
+Required variables in `stableguard-cre\.env` (names only — never paste values):
 
-| Variable | Used by |
-|---|---|
-| `ARB_SEPOLIA_RPC_URL` | Hardhat network connection |
-| `CRE_ETH_PRIVATE_KEY` | Deployer private key (all scripts) |
-| `ARBISCAN_API_KEY` | Contract verification |
-| `USE_DEMO_FORWARDER` | Set to `1` to deploy with MockKeystoneForwarder (demo only) |
+| Variable | Required? | Used by |
+|---|---|---|
+| `CRE_ETH_PRIVATE_KEY` | **Required** | Hardhat accounts (all deploy/demo scripts) and CRE CLI `--broadcast` signing |
+| `ARBISCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
+
+> `ARB_SEPOLIA_RPC_URL` is **hardcoded** in `hardhat.config.js` and does not need to be set.
+> `USE_DEMO_FORWARDER=1` is set inline in PowerShell (`$env:USE_DEMO_FORWARDER="1"`) immediately before the deploy command — never persisted in `.env`.
 
 ---
 
@@ -719,20 +720,21 @@ Arbitrum Sepolia ETH: get from the Arbitrum Sepolia faucet. Budget 25–30 trans
 
 Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepolia. Address: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`.
 
-### Environment variable names (never paste values)
+### Environment variables — `stableguard-cre\.env` (never paste values)
 
-| Variable | Required for |
-|---|---|
-| `ARB_SEPOLIA_RPC_URL` | All `--network arbitrumSepolia` commands |
-| `CRE_ETH_PRIVATE_KEY` | Deployer private key for all scripts |
-| `ARBISCAN_API_KEY` | Contract verification after deploy |
-| `USE_DEMO_FORWARDER` | Set to `1` to use MockKeystoneForwarder (demo only) |
+| Variable | Required? | Used by |
+|---|---|---|
+| `CRE_ETH_PRIVATE_KEY` | **Required** | Hardhat accounts (all deploy/demo scripts) and CRE CLI `--broadcast` signing |
+| `ARBISCAN_API_KEY` | For verify only | `npx hardhat verify --network arbitrumSepolia` |
+
+> `ARB_SEPOLIA_RPC_URL` is hardcoded in `hardhat.config.js` — not an env variable.
+> `USE_DEMO_FORWARDER=1` is set inline in PowerShell immediately before the deploy command — never in `.env`.
 
 ### Ordered step list
 
 ```
  1. Fund deployer wallet with Arbitrum Sepolia ETH and USDC
- 2. Set ARB_SEPOLIA_RPC_URL, CRE_ETH_PRIVATE_KEY, ARBISCAN_API_KEY in .env
+ 2. Set CRE_ETH_PRIVATE_KEY (and ARBISCAN_API_KEY if verifying) in stableguard-cre\.env
 
  3. Deploy core contracts (demo mode):
       $env:USE_DEMO_FORWARDER="1"
