@@ -1,18 +1,17 @@
 {
   "network": "arbitrumSepolia",
-  "deployedAt": "2026-09-10T14:44:33.307Z",
-  "deployer": "0xcBB1AD132bB51Cc41210309d6e3bd45598eebb5e",
+  "deployedAt": "2026-11-07T23:00:14.297Z",
+  "deployer": "0x770825801589815E4B558844199feb878B3d1561",
   "contracts": {
-    "ExposureRegistry": "0x55fc74c807dd5aC468Cf2e9B5c26Abb9b1149945",
-    "DepegEventRegistry": "0xAa940C87f3D3251fD297894b5cef7dC7e71b3665",
-    "ProtectionHoldLedger": "0xA3175824EEF5964bA5A839CdBc01e6F8F1F3444b",
-    "StableGuardVault": "0x86602cDeC52Df65Bc8D66528De429EB11A9E0497",
-    "StableGuardCREReceiver": "0xac83a85Ee4dF1FfF44DFdEF055e95Db4886a9aD8",
-    "previousReceiver": "0x8A3De0095Eb8741f89d3a3BF71DEA1d4857a9bbd"
+    "ExposureRegistry": "0xc961c43a86b101017900045e6Fc3a73F649C295C",
+    "DepegEventRegistry": "0xFd7B8e800b7e550422661feDaCb43fE19F705DaF",
+    "ProtectionHoldLedger": "0xbE3C970230b3D6A12a52a7D06Fa6EBA5de19037A",
+    "StableGuardVault": "0x85f5506f55C4c8f2F61DE1D5A833E3d58Dcf6bE9",
+    "StableGuardCREReceiver": "0x22a8588Bbe66Bc393187DA8ce06229551803106b"
   },
   "params": {
     "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
-    "keystoneForwarder": "0x76c9cf548b4179F8901cda1f8623568b58215E62",
+    "keystoneForwarder": "0xd41263567ddfead91504199b8c6c87371e83ca5d",
     "chainSelector": "3478487238524512106",
     "vaultName": "StableGuard USDC Vault",
     "vaultSymbol": "sgUSDC"

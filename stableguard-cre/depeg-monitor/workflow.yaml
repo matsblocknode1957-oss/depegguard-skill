@@ -39,3 +39,12 @@ arbitrum-demo-settings:
     workflow-path: "./main.ts"
     config-path: "./config.arbitrum-demo.json"
     secrets-path: "../secrets.yaml"
+
+arbitrum-demo-morpho-settings:
+  user-workflow:
+    workflow-name: "depeg-monitor-arbitrum-demo-morpho"
+    deployment-registry: "private"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.arbitrum-demo-morpho.json"
+    secrets-path: "../secrets.yaml"

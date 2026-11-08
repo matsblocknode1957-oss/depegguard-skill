@@ -2,14 +2,14 @@
   "_comment": "Demo config — Morpho path. Same TestPriceFeed and forwarder as arbitrum-demo; consumerAddress = MorphoCREReceiver (deployed by demo-wire-morpho.js). Fill in consumerAddress and demoFeedAddress before recording.",
   "schedule": "*/30 * * * * *",
   "chainSelectorName": "ethereum-testnet-sepolia-arbitrum-1",
-  "consumerAddress": "REPLACE_WITH_MORPHO_RECEIVER_ADDRESS",
+  "consumerAddress": "0x9E44d655c8958Cbb080030047948BA2857b10458",
   "chainSelector": "3478487238524512106",
   "coins": [
     {
       "symbol": "USDC",
       "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
       "priceFeedAddress": "REPLACE_WITH_CHAINLINK_USDC_USD_FEED_ARB_SEPOLIA",
-      "demoFeedAddress":  "REPLACE_WITH_TESTPRICEFEED_ADDRESS"
+      "demoFeedAddress":  "0x4E50A385b2c5D4e5eEe89FebABCddCaC76D85BB0"
     },
     {
       "symbol": "USDT",

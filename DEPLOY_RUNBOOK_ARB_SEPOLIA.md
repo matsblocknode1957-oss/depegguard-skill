@@ -332,14 +332,14 @@ Before recording, run a dry run with each demo config (no `--broadcast`). Requir
 
 ```powershell
 # Dry-run 1: main receiver path (TestPriceFeed → StableGuardCREReceiver)
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings
+Set-Location ..
 
 # Dry-run 2: Morpho receiver path (TestPriceFeed → MorphoCREReceiver)
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-morpho-settings
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings
+Set-Location ..
 ```
 
 No `--broadcast` — no on-chain writes. What the output proves:
@@ -367,7 +367,7 @@ Both configs point `demoFeedAddress` at the same TestPriceFeed and use the same 
 
 Pre-requisites: steps 2a–2h complete; small USDC deposit in vault; `vault.paused()` = false; `cre login` done.
 
-All `cre workflow simulate` commands run from `stableguard-cre\depeg-monitor`.
+All `cre workflow simulate` commands run from `stableguard-cre`.
 
 ---
 
@@ -392,10 +392,10 @@ TestPriceFeed now returns $0.94 = 600 bps below peg → CRITICAL when the workfl
 ### S1 Step 2 — CRE simulate cycle 1: NORMAL → WATCH (both receivers)
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+Set-Location ..
 ```
 
 Both configs read the same TestPriceFeed ($0.94 → CRITICAL) and write via the same
@@ -409,10 +409,10 @@ Arbiscan — MorphoDepegEventRegistry: `EventAdvanced(NORMAL → WATCH)`
 ### S1 Step 3 — CRE simulate cycle 2: WATCH → CONFIRMED\_DEPEG + vault freeze + Morpho cap
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+Set-Location ..
 ```
 
 Both receivers reach CONFIRMED_DEPEG. The main receiver pauses the vault; the Morpho receiver calls `adapter.onDepeg()`.
@@ -451,17 +451,17 @@ TestPriceFeed now returns $1.00 = 0 bps → STABLE.
 Run both targets three times each. stabilityWindow = 3 requires three consecutive stable reports per receiver.
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
+Set-Location stableguard-cre
 # Cycle 1
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
 # Cycle 2
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
 # Cycle 3
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-Set-Location ..\..
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+Set-Location ..
 ```
 
 After the third STABLE cycle, both event registries transition to **RECOVERY_PENDING**.
@@ -476,10 +476,10 @@ Arbiscan — MorphoDepegEventRegistry: `EventAdvanced(PROTECTED → RECOVERY_PEN
 After 1800 s (30 min), run one more cycle for both targets. `finalizeRecovery` becomes callable and the receiver calls it, transitioning the event to **NORMAL** and calling `vault.unpause()` automatically — **no human action**.
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+Set-Location ..
 ```
 
 Arbiscan — main receiver:
@@ -559,9 +559,9 @@ Remove-Item Env:PRICE
 ### S2 Step 2 — CRE simulate cycle 1: NORMAL → WATCH
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+Set-Location ..
 ```
 
 TestPriceFeed reads $0.94 → compositeScore 3 (CRITICAL). New incident: state **NORMAL → WATCH**. Fresh rootIncidentId — not suppressed by Scene 1.
@@ -571,9 +571,9 @@ TestPriceFeed reads $0.94 → compositeScore 3 (CRITICAL). New incident: state *
 ### S2 Step 3 — CRE simulate cycle 2: WATCH → CONFIRMED\_DEPEG + vault freeze
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+Set-Location ..
 ```
 
 TestPriceFeed still $0.94 → CRITICAL again.
@@ -612,11 +612,11 @@ The price oracle now reads $1.00. Future `cre workflow simulate` calls will prod
 ### S2 Step 6 — CRE simulate × 3: STABLE → RECOVERY\_PENDING; hold forces HOLD\_PAUSED
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+Set-Location ..
 ```
 
 TestPriceFeed reads $1.00 → compositeScore 0 (STABLE) on each call. What happens:
@@ -672,10 +672,10 @@ Remove-Item Env:PRICE
 ### S2 Step 10 — CRE simulate × 2: ProtectionSuppressed (vault stays unpaused)
 
 ```powershell
-Set-Location stableguard-cre\depeg-monitor
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-Set-Location ..\..
+Set-Location stableguard-cre
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+Set-Location ..
 ```
 
 TestPriceFeed reads $0.94 → CRITICAL on both reports. The first simulate advances the new incident from NORMAL → WATCH (suppression is not checked at WATCH). The second simulate would advance WATCH → CONFIRMED_DEPEG — but the coin-vault suppression set in S2 Step 8 is still active.
@@ -780,10 +780,10 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
 13. cre login
 
 14. Dry-run both configs to confirm they compile and read the TestPriceFeed:
-      Set-Location stableguard-cre\depeg-monitor
-      cre workflow simulate . --target=arbitrum-demo-settings
-      cre workflow simulate . --target=arbitrum-demo-morpho-settings
-      Set-Location ..\..
+      Set-Location stableguard-cre
+      cre workflow simulate depeg-monitor --target=arbitrum-demo-settings
+      cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings
+      Set-Location ..
       (consumerAddress confirms right receiver; USDC price ≈ 0.94 and compositeScore:3 confirms TestPriceFeed is read)
 
 --- RECORDING STARTS ---
@@ -796,17 +796,17 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Remove-Item Env:PRICE
 
 16. S1 cycle 1 — WATCH on both receivers:
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..
        (EventAdvanced NORMAL→WATCH on DepegEventRegistry and MorphoDepegEventRegistry)
 
 17. S1 cycle 2 — CONFIRMED_DEPEG: vault freeze + MorphoCapsZeroed:
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..
        (ProtectionInitiated, vault.paused() = true — KEY MOMENT 0)
        (MorphoCapsZeroed on MorphoSentinelAdapter — KEY MOMENT)
 
@@ -816,22 +816,22 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Remove-Item Env:RESET
 
 19. cre workflow simulate --broadcast × 3 per target (both targets) →  RECOVERY_PENDING on both receivers
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..
        (RECOVERY_PENDING on DepegEventRegistry and MorphoDepegEventRegistry)
 
 20. Wait 1800 s (30 min — do offscreen), then:
     cre workflow simulate --broadcast × 1 per target (both targets) →  NORMAL + vault auto-unpauses
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-morpho-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-morpho-settings --broadcast
+       Set-Location ..
        (EventTerminated NORMAL, vault.paused() = false — KEY MOMENT, no human action)
 
 --- Scene 1 ends (vault unpaused automatically) ---
@@ -844,14 +844,14 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Remove-Item Env:PRICE
 
 22. cre workflow simulate --broadcast × 1 (main only) →  WATCH (new incident, not suppressed)
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       Set-Location ..
 
 23. cre workflow simulate --broadcast × 1 (main only) →  CONFIRMED_DEPEG + vault freeze
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       Set-Location ..
        (vault.paused() = true — KEY MOMENT 0)
 
 24. demo-place-hold.js  →  override hold active; customer in control of exit
@@ -863,11 +863,11 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Remove-Item Env:RESET
 
 26. cre workflow simulate --broadcast × 3 (main only) →  RECOVERY_PENDING + HOLD_PAUSED (vault stays frozen)
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       Set-Location ..
        (price recovered but hold overrides auto-recovery — vault.paused() = true)
 
 27. Wait 1800 s (30 min — do offscreen)
@@ -882,10 +882,10 @@ Arbitrum Sepolia USDC: Circle USDC testnet faucet or bridge from Ethereum Sepoli
        Remove-Item Env:PRICE
 
 30. cre workflow simulate --broadcast × 2 (main only) →  ProtectionSuppressed (KEY MOMENT 2)
-       Set-Location stableguard-cre\depeg-monitor
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       cre workflow simulate . --target=arbitrum-demo-settings --broadcast
-       Set-Location ..\..
+       Set-Location stableguard-cre
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       cre workflow simulate depeg-monitor --target=arbitrum-demo-settings --broadcast
+       Set-Location ..
        (ProtectionSuppressed on receiver; vault.paused() = false — customer override in effect)
 
 --- RECORDING ENDS ---

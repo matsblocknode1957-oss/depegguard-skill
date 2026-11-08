@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import { encodeAbiParameters, parseAbiParameters } from "viem"
 import { calcDeviationBps, classifySignal } from "./helpers"
-import { hexToBytes, selectFeedAddress, decodePriceFeedAnswer } from "./main"
+import { hexToBytes, selectFeedAddress, decodePriceFeedAnswer } from "./helpers"
 
 const ONE_USD = 1_000_000_000_000_000_000n
 

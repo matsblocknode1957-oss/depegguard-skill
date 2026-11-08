@@ -7,20 +7,20 @@ import {
   prepareReportRequest,
 } from "@chainlink/cre-sdk"
 import {
-  decodeAbiParameters,
   encodeAbiParameters,
   parseAbiParameters,
 } from "viem"
-import { calcDeviationBps, classifySignal } from "./helpers.js"
+import {
+  type CoinConfig,
+  calcDeviationBps,
+  classifySignal,
+  hexToBytes,
+  bytesToHexStr,
+  decodePriceFeedAnswer,
+  selectFeedAddress,
+} from "./helpers.js"
 
 // ── Types ──────────────────────────────────────────────────────────────────────
-
-type CoinConfig = {
-  symbol:           string
-  address:          string   // mainnet address — chain-agnostic coin identifier
-  priceFeedAddress?: string  // Chainlink AggregatorV3 (latestRoundData) on target chain
-  demoFeedAddress?:  string  // TestPriceFeed override (settable); takes precedence over priceFeedAddress
-}
 
 type Config = {
   schedule:          string
@@ -41,7 +41,7 @@ type CoinResult = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const ONE_USD = 1_000_000_000_000_000_000n   // 1e18
+const ONE_USD = 1_000_000_000_000_000_000n
 
 // Stub offsets for offline simulation without chain access (all STABLE)
 const STUB_OFFSETS: Record<string, bigint> = {
@@ -59,46 +59,20 @@ const LATEST_ROUND_DATA_SEL = "feaf968c"
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-export function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.startsWith("0x") ? hex.slice(2) : hex
-  const bytes = new Uint8Array(clean.length / 2)
-  for (let i = 0; i < clean.length; i += 2) {
-    bytes[i / 2] = parseInt(clean.slice(i, i + 2), 16)
-  }
-  return bytes
-}
-
-function bytesToHexStr(bytes: Uint8Array): `0x${string}` {
-  let hex = "0x"
-  for (let i = 0; i < bytes.length; i++) {
-    hex += bytes[i]!.toString(16).padStart(2, "0")
-  }
-  return hex as `0x${string}`
-}
-
 function hexToBase64(hex: string): string {
   const bytes = hexToBytes(hex)
-  let binary = ""
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!)
-  return btoa(binary)
-}
-
-/** Returns demoFeedAddress when set, else priceFeedAddress. Used by handler and tests. */
-export function selectFeedAddress(coin: CoinConfig): string | undefined {
-  return coin.demoFeedAddress ?? coin.priceFeedAddress
-}
-
-/**
- * Decodes a latestRoundData() ABI reply (uint80,int256,uint256,uint256,uint80)
- * and scales the 8-decimal USD answer to 18 decimals.
- * Exported for unit tests.
- */
-export function decodePriceFeedAnswer(data: Uint8Array): bigint {
-  const [, answer] = decodeAbiParameters(
-    parseAbiParameters("uint80, int256, uint256, uint256, uint80"),
-    bytesToHexStr(data),
-  )
-  return answer > 0n ? answer * 10_000_000_000n : 0n
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  let out = ""
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i]!
+    const b = i + 1 < bytes.length ? bytes[i + 1]! : 0
+    const c = i + 2 < bytes.length ? bytes[i + 2]! : 0
+    out += chars[a >> 2]!
+    out += chars[((a & 3) << 4) | (b >> 4)]!
+    out += i + 1 < bytes.length ? chars[((b & 15) << 2) | (c >> 6)]! : "="
+    out += i + 2 < bytes.length ? chars[c & 63]! : "="
+  }
+  return out
 }
 
 function readPriceFeed(
